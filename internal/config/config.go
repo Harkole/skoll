@@ -31,7 +31,10 @@ type Config struct {
 }
 
 // Load loads configuration from environment variables with sensible defaults.
+// It also parses a local .env file if present in the current working directory.
 func Load() (*Config, error) {
+	loadDotEnv(".env")
+
 	port := getEnv("SKOLL_PORT", "8081")
 	if !strings.HasPrefix(port, ":") {
 		port = ":" + port
@@ -109,3 +112,29 @@ func getEnvAsInt(key string, defaultVal int) int {
 	}
 	return defaultVal
 }
+
+// loadDotEnv parses key=value pairs from a file and sets them in the environment if not already set.
+func loadDotEnv(filepath string) {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		val = strings.Trim(val, `"'`)
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, val)
+		}
+	}
+}
+

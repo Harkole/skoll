@@ -282,7 +282,7 @@ func (d *DB) ListAuditLogs(ctx context.Context, limit int) ([]*AuditLog, error) 
 	query := `
 	SELECT id, timestamp, discord_user_id, username, action, target_project, status
 	FROM audit_logs
-	ORDER BY timestamp DESC
+	ORDER BY timestamp DESC, id DESC
 	LIMIT ?
 	`
 	rows, err := d.db.QueryContext(ctx, query, limit)

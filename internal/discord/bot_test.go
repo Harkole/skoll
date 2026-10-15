@@ -2,8 +2,15 @@ package discord
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/bwmarrin/discordgo"
 
 	"github.com/Harkole/skoll/internal/database"
 )
@@ -134,3 +141,107 @@ func TestCommandDefinitions(t *testing.T) {
 		}
 	}
 }
+
+type interceptingTransport struct {
+	handler http.HandlerFunc
+}
+
+func (it *interceptingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	it.handler(rec, req)
+	return rec.Result(), nil
+}
+
+func TestInteractionDeferralAndEdit(t *testing.T) {
+	var lastMethod, lastPath string
+	var lastBody []byte
+
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("failed to create discordgo session: %v", err)
+	}
+
+	session.Client = &http.Client{
+		Transport: &interceptingTransport{
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				lastMethod = r.Method
+				lastPath = r.URL.Path
+				lastBody, _ = io.ReadAll(r.Body)
+
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"id":"msg123","content":"ok"}`))
+			},
+		},
+	}
+
+	interaction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "interaction_999",
+			Token: "interaction_token_abc",
+			AppID: "app_123",
+		},
+	}
+
+	// 1. Test DeferResponse
+	if err := DeferResponse(session, interaction); err != nil {
+		t.Fatalf("unexpected error from DeferResponse: %v", err)
+	}
+	if lastMethod != http.MethodPost {
+		t.Errorf("expected POST method, got %s", lastMethod)
+	}
+	if !strings.Contains(lastPath, "interaction_999") || !strings.Contains(lastPath, "callback") {
+		t.Errorf("unexpected callback path: %s", lastPath)
+	}
+
+	var respPayload struct {
+		Type int `json:"type"`
+	}
+	_ = json.Unmarshal(lastBody, &respPayload)
+	// Type 5 is InteractionResponseDeferredChannelMessageWithSource
+	if respPayload.Type != int(discordgo.InteractionResponseDeferredChannelMessageWithSource) {
+		t.Errorf("expected response type %d, got %d", discordgo.InteractionResponseDeferredChannelMessageWithSource, respPayload.Type)
+	}
+
+	// 2. Test DeferEphemeralResponse
+	if err := DeferEphemeralResponse(session, interaction); err != nil {
+		t.Fatalf("unexpected error from DeferEphemeralResponse: %v", err)
+	}
+	var ephemeralPayload struct {
+		Type int `json:"type"`
+		Data struct {
+			Flags int `json:"flags"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(lastBody, &ephemeralPayload)
+	if ephemeralPayload.Data.Flags != int(discordgo.MessageFlagsEphemeral) {
+		t.Errorf("expected ephemeral flag %d, got %d", discordgo.MessageFlagsEphemeral, ephemeralPayload.Data.Flags)
+	}
+
+	// 3. Test EditResponseEmbed
+	testEmbed := &discordgo.MessageEmbed{
+		Title:       "Test Success",
+		Description: "Operation completed",
+	}
+	if err := EditResponseEmbed(session, interaction, testEmbed); err != nil {
+		t.Fatalf("unexpected error from EditResponseEmbed: %v", err)
+	}
+	if lastMethod != http.MethodPatch {
+		t.Errorf("expected PATCH method for webhook edit, got %s", lastMethod)
+	}
+	if !strings.Contains(lastPath, "webhooks") || !strings.Contains(lastPath, "@original") {
+		t.Errorf("unexpected webhook edit path: %s", lastPath)
+	}
+	if !strings.Contains(string(lastBody), "Test Success") {
+		t.Errorf("expected embed title in request body: %s", string(lastBody))
+	}
+
+	// 4. Test EditResponseText
+	if err := EditResponseText(session, interaction, "Updated text response"); err != nil {
+		t.Fatalf("unexpected error from EditResponseText: %v", err)
+	}
+	if !strings.Contains(string(lastBody), "Updated text response") {
+		t.Errorf("expected updated text in request body: %s", string(lastBody))
+	}
+}
+

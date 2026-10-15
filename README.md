@@ -146,6 +146,7 @@ http://localhost:8081/admin?key=skoll-admin-secret
 ```
 
 ### Features:
+- **Docker Stacks & Compose Viewer**: Tabbed viewer listing registered Fenrir stacks, container statuses, active ports, images, and a modal to inspect/copy raw `compose.yml` definitions.
 - **User Role Management**: View all linked users and modify their roles (Admin, Operator, Viewer, Unlinked) via an instant form update.
 - **Audit Feed**: Complete activity trail showing timestamps, Discord usernames, Discord user IDs, actions (e.g. `server_restart`, `stack_deploy`), target stacks, and execution statuses (`SUCCESS`, `FAILED`, `UNAUTHORIZED`).
 - **Daemon Telemetry**: Real-time connectivity indicator with Fenrir Daemon.
@@ -155,6 +156,8 @@ http://localhost:8081/admin?key=skoll-admin-secret
 - `GET /api/v1/users` — List linked users (Header: `X-Admin-Key: <key>`).
 - `POST /api/v1/users/{id}/role` — Update user role (JSON: `{"role": "Operator"}`).
 - `GET /api/v1/audit-logs` — Fetch audit logs (Query: `?limit=50`).
+- `GET /api/v1/stacks` — List active Fenrir stacks and container details.
+- `GET /api/v1/stacks/{name}/compose` — Fetch raw `compose.yml` for a stack.
 
 ---
 

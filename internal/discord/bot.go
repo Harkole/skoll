@@ -295,6 +295,11 @@ func (b *Bot) HandleServerCommand(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 
+	// Defer interaction response immediately to prevent Discord's 3-second timeout
+	if err := DeferResponse(s, i); err != nil {
+		log.Printf("[Discord] Warning: failed to defer interaction for /server %s: %v", action, err)
+	}
+
 	// Execute requested action
 	var execErr error
 	switch action {
@@ -305,7 +310,7 @@ func (b *Bot) HandleServerCommand(s *discordgo.Session, i *discordgo.Interaction
 	case "stop":
 		execErr = b.fenrirClient.StopProject(ctx, stackName)
 	default:
-		_ = ReplyEphemeral(s, i, "Unknown server subcommand.")
+		_ = EditResponseText(s, i, "Unknown server subcommand.")
 		return
 	}
 
@@ -316,7 +321,7 @@ func (b *Bot) HandleServerCommand(s *discordgo.Session, i *discordgo.Interaction
 			Description: fmt.Sprintf("An error occurred while communicating with Fenrir Daemon for stack `%s`:\n\n```%s```", stackName, execErr.Error()),
 			Color:       0xef4444, // Red
 		}
-		_ = ReplyEmbed(s, i, embed)
+		_ = EditResponseEmbed(s, i, embed)
 		return
 	}
 
@@ -327,7 +332,7 @@ func (b *Bot) HandleServerCommand(s *discordgo.Session, i *discordgo.Interaction
 		Color:       0x22c55e, // Green
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}
-	_ = ReplyEmbed(s, i, embed)
+	_ = EditResponseEmbed(s, i, embed)
 }
 
 func titleCase(s string) string {
@@ -385,6 +390,11 @@ func (b *Bot) HandleStackCommand(s *discordgo.Session, i *discordgo.InteractionC
 			return
 		}
 
+		// Defer interaction response immediately to prevent Discord's 3-second timeout
+		if err := DeferResponse(s, i); err != nil {
+			log.Printf("[Discord] Warning: failed to defer interaction for /stack deploy: %v", err)
+		}
+
 		if err := b.fenrirClient.DeployProject(ctx, stackName, composeYAML); err != nil {
 			_ = b.db.RecordAuditLog(ctx, dbUser.DiscordID, dbUser.Username, "stack_deploy", stackName, "FAILED")
 			embed := &discordgo.MessageEmbed{
@@ -392,7 +402,7 @@ func (b *Bot) HandleStackCommand(s *discordgo.Session, i *discordgo.InteractionC
 				Description: fmt.Sprintf("Fenrir rejected the deployment for stack `%s`:\n\n```%s```", stackName, err.Error()),
 				Color:       0xef4444,
 			}
-			_ = ReplyEmbed(s, i, embed)
+			_ = EditResponseEmbed(s, i, embed)
 			return
 		}
 
@@ -403,7 +413,7 @@ func (b *Bot) HandleStackCommand(s *discordgo.Session, i *discordgo.InteractionC
 			Color:       0x22c55e,
 			Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		}
-		_ = ReplyEmbed(s, i, embed)
+		_ = EditResponseEmbed(s, i, embed)
 
 	case "list":
 		// List requires Viewer role

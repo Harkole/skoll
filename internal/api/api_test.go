@@ -13,6 +13,7 @@ import (
 
 	"github.com/Harkole/skoll/internal/config"
 	"github.com/Harkole/skoll/internal/database"
+	"github.com/Harkole/skoll/internal/fenrir"
 )
 
 type mockOAuthExchanger struct {
@@ -260,3 +261,146 @@ func TestAdminDashboardAndRoleUpdate(t *testing.T) {
 		t.Errorf("expected role_update in audit logs json")
 	}
 }
+
+func TestAdminStacksAndComposeViewer(t *testing.T) {
+	// 1. Setup mock Fenrir daemon
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/health":
+			_, _ = w.Write([]byte(`{"status":"healthy","version":"1.2.0"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
+			_, _ = w.Write([]byte(`{
+				"data": [
+					{
+						"name": "valheim-srv",
+						"status": "running",
+						"services": [
+							{"name": "valheim", "image": "lloesche/valheim-server:latest", "state": "running", "status": "Up 5 hours", "ports": ["2456-2457/udp"]}
+						]
+					},
+					{
+						"name": "redis-cache",
+						"status": "stopped",
+						"services": [
+							{"name": "redis", "image": "redis:alpine", "state": "exited", "status": "Exited (0) 10m ago"}
+						]
+					}
+				]
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/valheim-srv/compose":
+			_, _ = w.Write([]byte(`{
+				"compose": "version: '3.8'\nservices:\n  valheim:\n    image: lloesche/valheim-server:latest\n    ports:\n      - \"2456-2457/udp\"\n"
+			}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/redis-cache/compose":
+			_, _ = w.Write([]byte(`{
+				"compose": "version: '3.8'\nservices:\n  redis:\n    image: redis:alpine\n"
+			}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+	defer fenrirServer.Close()
+
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-key", 5*time.Second)
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_stacks_api.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		AdminKey:     "admin-secret",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+
+	// Test 1: Authenticated request to /admin with tab=stacks
+	req := httptest.NewRequest(http.MethodGet, "/admin?key=admin-secret&tab=stacks", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	// Must contain stack names
+	if !strings.Contains(body, "valheim-srv") || !strings.Contains(body, "redis-cache") {
+		t.Errorf("expected valheim-srv and redis-cache in HTML response")
+	}
+	// Must contain service details
+	if !strings.Contains(body, "lloesche/valheim-server:latest") {
+		t.Errorf("expected image details in HTML response")
+	}
+	if !strings.Contains(body, "2456-2457/udp") {
+		t.Errorf("expected port in HTML response")
+	}
+	// Must contain compose viewer button and modal elements
+	if !strings.Contains(body, "showComposeModal") || !strings.Contains(body, "composeModal") {
+		t.Errorf("expected compose modal trigger in HTML response")
+	}
+	// Must contain compose definition inside hidden textarea
+	if !strings.Contains(body, "compose-data-valheim-srv") {
+		t.Errorf("expected compose textarea in HTML response")
+	}
+
+	// Test 2: Redirect /admin/stacks to /admin?tab=stacks
+	reqRedirect := httptest.NewRequest(http.MethodGet, "/admin/stacks?key=admin-secret", nil)
+	wRedirect := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wRedirect, reqRedirect)
+
+	if wRedirect.Code != http.StatusTemporaryRedirect {
+		t.Errorf("expected 307 redirect from /admin/stacks, got %d", wRedirect.Code)
+	}
+	if loc := wRedirect.Header().Get("Location"); !strings.Contains(loc, "/admin?tab=stacks") {
+		t.Errorf("expected redirect to /admin?tab=stacks, got %s", loc)
+	}
+
+	// Test 3: AJAX /admin/compose?name=valheim-srv
+	reqCompose := httptest.NewRequest(http.MethodGet, "/admin/compose?name=valheim-srv&key=admin-secret", nil)
+	wCompose := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wCompose, reqCompose)
+
+	if wCompose.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin/compose, got %d: %s", wCompose.Code, wCompose.Body.String())
+	}
+	if !strings.Contains(wCompose.Body.String(), "lloesche/valheim-server") {
+		t.Errorf("expected compose YAML in JSON response, got: %s", wCompose.Body.String())
+	}
+
+	// Test 4: REST API /api/v1/stacks
+	reqAPIStacks := httptest.NewRequest(http.MethodGet, "/api/v1/stacks", nil)
+	reqAPIStacks.Header.Set("X-Admin-Key", "admin-secret")
+	wAPIStacks := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAPIStacks, reqAPIStacks)
+
+	if wAPIStacks.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/stacks, got %d: %s", wAPIStacks.Code, wAPIStacks.Body.String())
+	}
+	if !strings.Contains(wAPIStacks.Body.String(), "valheim-srv") {
+		t.Errorf("expected valheim-srv in /api/v1/stacks, got: %s", wAPIStacks.Body.String())
+	}
+
+	// Test 5: REST API /api/v1/stacks/{name}/compose
+	reqAPICompose := httptest.NewRequest(http.MethodGet, "/api/v1/stacks/valheim-srv/compose", nil)
+	reqAPICompose.Header.Set("X-Admin-Key", "admin-secret")
+	wAPICompose := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAPICompose, reqAPICompose)
+
+	if wAPICompose.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /api/v1/stacks/valheim-srv/compose, got %d: %s", wAPICompose.Code, wAPICompose.Body.String())
+	}
+	if !strings.Contains(wAPICompose.Body.String(), "lloesche/valheim-server") {
+		t.Errorf("expected compose in /api/v1/stacks/{name}/compose, got: %s", wAPICompose.Body.String())
+	}
+}
+

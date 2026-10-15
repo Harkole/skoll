@@ -79,6 +79,40 @@ func ReplyEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *dis
 	})
 }
 
+// DeferResponse acknowledges the interaction immediately so Discord doesn't timeout.
+func DeferResponse(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+}
+
+// DeferEphemeralResponse acknowledges the interaction immediately in an ephemeral state.
+func DeferEphemeralResponse(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags: discordgo.MessageFlagsEphemeral,
+		},
+	})
+}
+
+// EditResponseEmbed edits the original deferred interaction response with an embed.
+func EditResponseEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed) error {
+	embeds := []*discordgo.MessageEmbed{embed}
+	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Embeds: &embeds,
+	})
+	return err
+}
+
+// EditResponseText edits the original deferred interaction response with text content.
+func EditResponseText(s *discordgo.Session, i *discordgo.InteractionCreate, message string) error {
+	_, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content: &message,
+	})
+	return err
+}
+
 // GetInteractionUser extracts the sender's User struct from Guild Member or Direct Message.
 func GetInteractionUser(i *discordgo.InteractionCreate) *discordgo.User {
 	if i.Member != nil && i.Member.User != nil {

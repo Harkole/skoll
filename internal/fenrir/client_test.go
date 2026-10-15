@@ -54,6 +54,10 @@ func TestFenrirClient(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusAccepted)
 			_ = json.NewEncoder(w).Encode(map[string]string{"message": "created"})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/minecraft-srv/compose":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"compose": "version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft-server:latest\n",
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/metrics/host":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
@@ -108,7 +112,22 @@ func TestFenrirClient(t *testing.T) {
 		t.Errorf("expected 15.4 cpu, got %f", metrics.CPUPercent)
 	}
 
-	// 6. Test Unauthorized
+	// 6. Get Project Compose
+	composeStr, err := client.GetProjectCompose(ctx, "minecraft-srv")
+	if err != nil {
+		t.Fatalf("unexpected compose fetch error: %v", err)
+	}
+	if composeStr == "" {
+		t.Errorf("expected non-empty compose content")
+	}
+
+	// 7. Reconstruct Compose fallback test
+	fallbackYAML := ReconstructCompose(&projects[0])
+	if fallbackYAML == "" {
+		t.Errorf("expected reconstructed compose YAML")
+	}
+
+	// 8. Test Unauthorized
 	badClient := NewClient(server.URL, "wrong-key", 5*time.Second)
 	_, err = badClient.GetHealth(ctx)
 	if err != ErrUnauthorized {

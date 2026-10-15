@@ -20,10 +20,12 @@ type ServiceInfo struct {
 
 // Project represents a Docker Compose stack managed by Fenrir.
 type Project struct {
-	Name      string        `json:"name"`
-	Status    string        `json:"status"` // running, stopped, degraded, unknown
-	CreatedAt time.Time     `json:"created_at,omitempty"`
-	Services  []ServiceInfo `json:"services,omitempty"`
+	Name        string        `json:"name"`
+	Status      string        `json:"status"` // running, stopped, degraded, unknown
+	CreatedAt   time.Time     `json:"created_at,omitempty"`
+	Services    []ServiceInfo `json:"services,omitempty"`
+	Compose     string        `json:"compose,omitempty"`
+	ComposeYAML string        `json:"compose_yaml,omitempty"`
 }
 
 // HostMetrics represents system metrics collected by Fenrir.

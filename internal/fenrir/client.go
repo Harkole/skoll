@@ -192,3 +192,94 @@ func (c *Client) GetHostMetrics(ctx context.Context) (*HostMetrics, error) {
 	}
 	return &metrics, nil
 }
+
+// GetProjectCompose retrieves the raw compose definition for a project.
+func (c *Client) GetProjectCompose(ctx context.Context, name string) (string, error) {
+	// 1. Try GET /api/v1/projects/{name}/compose
+	url := c.baseURL + fmt.Sprintf("/api/v1/projects/%s/compose", name)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err == nil {
+		req.Header.Set("User-Agent", "Skoll-Companion/1.0")
+		if c.apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+c.apiKey)
+			req.Header.Set("X-API-Key", c.apiKey)
+		}
+		resp, err := c.httpClient.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				var payload struct {
+					Compose string `json:"compose"`
+					Content string `json:"content"`
+					Data    any    `json:"data"`
+				}
+				if json.Unmarshal(bodyBytes, &payload) == nil {
+					if payload.Compose != "" {
+						return payload.Compose, nil
+					}
+					if payload.Content != "" {
+						return payload.Content, nil
+					}
+					if strData, ok := payload.Data.(string); ok && strData != "" {
+						return strData, nil
+					}
+					if mapData, ok := payload.Data.(map[string]any); ok {
+						if comp, ok := mapData["compose"].(string); ok && comp != "" {
+							return comp, nil
+						}
+					}
+				}
+				if len(bodyBytes) > 0 {
+					return string(bodyBytes), nil
+				}
+			}
+		}
+	}
+
+	// 2. Fallback: try GET /api/v1/projects/{name}
+	proj, err := c.GetProject(ctx, name)
+	if err == nil && proj != nil {
+		if proj.Compose != "" {
+			return proj.Compose, nil
+		}
+		if proj.ComposeYAML != "" {
+			return proj.ComposeYAML, nil
+		}
+		// 3. Fallback: Reconstruct YAML from services if available
+		if len(proj.Services) > 0 {
+			return ReconstructCompose(proj), nil
+		}
+	}
+
+	return "", fmt.Errorf("compose file not found for project %s", name)
+}
+
+// ReconstructCompose generates a fallback compose YAML representation from project services.
+func ReconstructCompose(project *Project) string {
+	if project == nil || len(project.Services) == 0 {
+		return "# No compose configuration or service metadata available."
+	}
+	var sb strings.Builder
+	sb.WriteString("# Compose definition reconstructed from Fenrir service telemetry\n")
+	sb.WriteString("version: '3.8'\n\nservices:\n")
+	for _, svc := range project.Services {
+		sb.WriteString(fmt.Sprintf("  %s:\n", svc.Name))
+		if svc.Image != "" {
+			sb.WriteString(fmt.Sprintf("    image: %s\n", svc.Image))
+		} else {
+			sb.WriteString("    image: alpine:latest\n")
+		}
+		if len(svc.Ports) > 0 {
+			sb.WriteString("    ports:\n")
+			for _, port := range svc.Ports {
+				sb.WriteString(fmt.Sprintf("      - \"%s\"\n", port))
+			}
+		}
+		if svc.State != "" || svc.Status != "" {
+			sb.WriteString(fmt.Sprintf("    # State: %s | Status: %s\n", svc.State, svc.Status))
+		}
+	}
+	return sb.String()
+}
+

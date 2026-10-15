@@ -82,12 +82,16 @@ func (s *Server) routes() {
 
 	// Admin Control Panel
 	s.mux.HandleFunc("GET /admin", s.handleAdminDashboard)
+	s.mux.HandleFunc("GET /admin/stacks", s.handleAdminStacksRedirect)
+	s.mux.HandleFunc("GET /admin/compose", s.handleAdminGetCompose)
 	s.mux.HandleFunc("POST /admin/role", s.handleAdminRoleUpdate)
 
 	// Admin REST API
 	s.mux.HandleFunc("GET /api/v1/users", s.handleAPIListUsers)
 	s.mux.HandleFunc("POST /api/v1/users/{id}/role", s.handleAPIUpdateRole)
 	s.mux.HandleFunc("GET /api/v1/audit-logs", s.handleAPIListAuditLogs)
+	s.mux.HandleFunc("GET /api/v1/stacks", s.handleAPIListStacks)
+	s.mux.HandleFunc("GET /api/v1/stacks/{name}/compose", s.handleAPIGetStackCompose)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -265,26 +269,54 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check Fenrir status
+	// Check Fenrir status and fetch stacks
 	fenrirStatus := "Online"
+	var projects []fenrir.Project
+	runningStacksCount := 0
 	if s.fenrirClient != nil {
 		if _, err := s.fenrirClient.GetHealth(ctx); err != nil {
 			fenrirStatus = "Offline / Unreachable"
+		} else {
+			if projs, err := s.fenrirClient.ListProjects(ctx); err == nil {
+				projects = projs
+				for i := range projects {
+					if strings.ToLower(projects[i].Status) == "running" {
+						runningStacksCount++
+					}
+					// Pre-load compose definition if available so inspect modal is instant
+					if projects[i].Compose == "" {
+						if comp, err := s.fenrirClient.GetProjectCompose(ctx, projects[i].Name); err == nil {
+							projects[i].Compose = comp
+						} else {
+							projects[i].Compose = fenrir.ReconstructCompose(&projects[i])
+						}
+					}
+				}
+			}
 		}
 	} else {
 		fenrirStatus = "Not Configured"
 	}
 
+	activeTab := strings.TrimSpace(r.URL.Query().Get("tab"))
+	if activeTab == "" {
+		activeTab = "stacks"
+	}
+
 	data := map[string]any{
-		"Users":         users,
-		"AuditLogs":     logs,
-		"TotalUsers":    len(users),
-		"AdminCount":    adminCount,
-		"OperatorCount": operatorCount,
-		"AuditCount":    len(logs),
-		"FenrirStatus":  fenrirStatus,
-		"AdminKey":      s.cfg.AdminKey,
-		"Notification":  r.URL.Query().Get("notification"),
+		"Users":              users,
+		"AuditLogs":          logs,
+		"Projects":           projects,
+		"TotalUsers":         len(users),
+		"AdminCount":         adminCount,
+		"OperatorCount":      operatorCount,
+		"AuditCount":         len(logs),
+		"TotalStacks":        len(projects),
+		"RunningStacksCount": runningStacksCount,
+		"FenrirStatus":       fenrirStatus,
+		"AdminKey":           s.cfg.AdminKey,
+		"Notification":       r.URL.Query().Get("notification"),
+		"ActiveTab":          activeTab,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -421,3 +453,86 @@ func (s *Server) renderError(w http.ResponseWriter, status int, msg string) {
 		"ErrorMessage": msg,
 	})
 }
+
+// handleAdminStacksRedirect redirects /admin/stacks to /admin?tab=stacks.
+func (s *Server) handleAdminStacksRedirect(w http.ResponseWriter, r *http.Request) {
+	target := "/admin?tab=stacks"
+	if key := r.URL.Query().Get("key"); key != "" {
+		target += "&key=" + url.QueryEscape(key)
+	}
+	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+}
+
+// handleAdminGetCompose retrieves the compose YAML for a stack in JSON format for the admin modal.
+func (s *Server) handleAdminGetCompose(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyAdminAuth(r) {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" {
+		http.Error(w, `{"error":"missing stack name"}`, http.StatusBadRequest)
+		return
+	}
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	compose, err := s.fenrirClient.GetProjectCompose(r.Context(), name)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"name":    name,
+		"compose": compose,
+	})
+}
+
+// handleAPIListStacks lists all Docker Compose stacks registered with Fenrir.
+func (s *Server) handleAPIListStacks(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyAdminAuth(r) {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	projects, err := s.fenrirClient.ListProjects(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(projects)
+}
+
+// handleAPIGetStackCompose returns raw compose file content for a named stack.
+func (s *Server) handleAPIGetStackCompose(w http.ResponseWriter, r *http.Request) {
+	if !s.verifyAdminAuth(r) {
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		http.Error(w, `{"error":"missing stack name"}`, http.StatusBadRequest)
+		return
+	}
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	compose, err := s.fenrirClient.GetProjectCompose(r.Context(), name)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"name":    name,
+		"compose": compose,
+	})
+}
+

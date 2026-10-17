@@ -21,6 +21,7 @@ type Config struct {
 	DiscordClientID     string
 	DiscordClientSecret string
 	DiscordRedirectURI  string
+	SessionSecret       string // Secret key for AES-256 session encryption
 
 	// Fenrir Daemon connection
 	FenrirAPIURL string
@@ -47,7 +48,12 @@ func Load() (*Config, error) {
 	botToken := getEnv("DISCORD_BOT_TOKEN", "")
 	clientID := getEnv("DISCORD_CLIENT_ID", "")
 	clientSecret := getEnv("DISCORD_CLIENT_SECRET", "")
-	redirectURI := getEnv("DISCORD_REDIRECT_URI", publicURL+"/auth/discord/callback")
+	redirectURI := getEnv("DISCORD_REDIRECT_URI", publicURL+"/auth/callback")
+
+	sessionSecret := getEnv("SKOLL_SESSION_SECRET", "")
+	if sessionSecret == "" {
+		sessionSecret = clientSecret + ":" + adminKey
+	}
 
 	fenrirURL := strings.TrimRight(getEnv("FENRIR_API_URL", "http://localhost:8080"), "/")
 	fenrirKey := getEnv("FENRIR_API_KEY", "")
@@ -63,6 +69,7 @@ func Load() (*Config, error) {
 		DiscordClientID:     clientID,
 		DiscordClientSecret: clientSecret,
 		DiscordRedirectURI:  redirectURI,
+		SessionSecret:       sessionSecret,
 		FenrirAPIURL:        fenrirURL,
 		FenrirAPIKey:        fenrirKey,
 		HTTPTimeout:         time.Duration(timeoutSec) * time.Second,

@@ -808,6 +808,13 @@ var (
             </div>
             <div style="display: flex; gap: 12px; align-items: center;">
                 <span class="badge-system">Fenrir: {{.FenrirStatus}}</span>
+                {{if .CurrentUser}}
+                <div style="display: flex; align-items: center; gap: 8px; background: #161b22; padding: 6px 12px; border-radius: 8px; border: 1px solid #30363d;">
+                    <span style="color: var(--accent-blue); font-weight: 600; font-size: 13px;">{{.CurrentUser.Username}}</span>
+                    <span class="role-pill role-{{.CurrentUser.Role}}" style="font-size: 11px; padding: 2px 8px;">{{.CurrentUser.Role}}</span>
+                    <a href="/auth/logout" style="color: var(--text-secondary); text-decoration: none; font-size: 12px; margin-left: 6px;" title="Logout">Log out</a>
+                </div>
+                {{end}}
             </div>
         </header>
 
@@ -1433,18 +1440,32 @@ var (
 </body>
 </html>`))
 
-	adminLoginTemplate = template.Must(template.New("admin_login").Parse(`<!DOCTYPE html>
+	loginTemplate = template.Must(template.New("login").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sköll Admin - Authorization Required</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>Sköll - Login with Discord</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg-color: #0b0f17;
+            --surface-color: #121824;
+            --surface-border: #232d3f;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --discord-blurple: #5865F2;
+            --discord-hover: #4752C4;
+            --accent-cyan: #38bdf8;
+            --accent-red: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
             font-family: 'Inter', sans-serif;
-            background-color: #0b0f17;
-            color: #f8fafc;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
             min-height: 100vh;
             display: flex;
             align-items: center;
@@ -1452,52 +1473,222 @@ var (
             padding: 24px;
         }
         .login-card {
-            background: #121824;
-            border: 1px solid #232d3f;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-            border-radius: 14px;
-            max-width: 420px;
+            background: var(--surface-color);
+            border: 1px solid var(--surface-border);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6), 0 0 30px rgba(88, 101, 242, 0.1);
+            border-radius: 16px;
+            max-width: 440px;
             width: 100%;
-            padding: 36px;
+            padding: 40px 36px;
             text-align: center;
         }
-        h2 { font-size: 22px; margin-bottom: 8px; }
-        p { color: #94a3b8; font-size: 14px; margin-bottom: 24px; }
-        input[type="password"] {
-            width: 100%;
-            background: #0f1522;
-            border: 1px solid #334155;
+        .logo-symbol {
+            width: 48px;
+            height: 48px;
+            background: linear-gradient(135deg, #0284c7, #6366f1);
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 24px;
             color: white;
+            box-shadow: 0 0 20px rgba(2, 132, 199, 0.4);
+            margin-bottom: 20px;
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 14px;
+            margin-bottom: 28px;
+            line-height: 1.5;
+        }
+        .btn-discord {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            width: 100%;
+            background-color: var(--discord-blurple);
+            color: white;
+            text-decoration: none;
+            padding: 14px 24px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 15px;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 14px rgba(88, 101, 242, 0.4);
+        }
+        .btn-discord:hover {
+            background-color: var(--discord-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(88, 101, 242, 0.6);
+        }
+        .btn-discord svg {
+            width: 22px;
+            height: 22px;
+            fill: currentColor;
+        }
+        .badge-notice {
+            margin-top: 24px;
+            padding: 12px 14px;
+            background: rgba(30, 41, 59, 0.6);
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            text-align: left;
+        }
+        .badge-notice strong {
+            color: var(--accent-cyan);
+        }
+        .alert-error {
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid var(--accent-red);
+            color: #fca5a5;
             padding: 12px 14px;
             border-radius: 8px;
-            font-size: 14px;
-            margin-bottom: 16px;
-            outline: none;
+            font-size: 13px;
+            margin-bottom: 20px;
+            text-align: left;
         }
-        input[type="password"]:focus {
-            border-color: #38bdf8;
-        }
-        button {
-            width: 100%;
-            background: #2563eb;
-            color: white;
-            border: none;
-            padding: 12px;
-            border-radius: 8px;
-            font-weight: 600;
-            cursor: pointer;
-        }
-        button:hover { background: #1d4ed8; }
     </style>
 </head>
 <body>
     <div class="login-card">
-        <h2>Sköll Admin Panel</h2>
-        <p>Please enter your <code>SKOLL_ADMIN_KEY</code> to access user role management.</p>
-        <form method="GET" action="/admin">
-            <input type="password" name="key" placeholder="Enter Admin Secret Key" required autofocus>
-            <button type="submit">Access Dashboard</button>
-        </form>
+        <div class="logo-symbol">S</div>
+        <h1>Sköll Control Panel</h1>
+        <p class="subtitle">Authenticate with your Discord identity to manage Docker Compose stacks, access control, and configurations.</p>
+
+        {{if .ErrorMessage}}
+        <div class="alert-error">
+            {{.ErrorMessage}}
+        </div>
+        {{end}}
+
+        <a href="/auth/login" class="btn-discord" id="discord-login-btn">
+            <svg viewBox="0 0 127.14 96.36">
+                <path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,45.91,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,45.91,96.12,53,91.08,65.69,84.69,65.69Z"/>
+            </svg>
+            <span>Login with Discord</span>
+        </a>
+
+        <div class="badge-notice">
+            <strong>Access Requirements:</strong> Operator or Admin role required. The first linked Discord user is automatically granted Administrator privileges.
+        </div>
+    </div>
+</body>
+</html>`))
+
+	adminLoginTemplate = loginTemplate
+
+	forbiddenTemplate = template.Must(template.New("forbidden").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sköll - 403 Forbidden</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f17;
+            --surface-color: #121824;
+            --surface-border: #ef4444;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent-cyan: #38bdf8;
+            --accent-red: #ef4444;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+        .card {
+            background: var(--surface-color);
+            border: 1px solid var(--surface-border);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6), 0 0 30px rgba(239, 68, 68, 0.15);
+            border-radius: 16px;
+            max-width: 480px;
+            width: 100%;
+            padding: 40px 36px;
+            text-align: center;
+        }
+        .icon {
+            font-size: 42px;
+            margin-bottom: 16px;
+        }
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--accent-red);
+            margin-bottom: 12px;
+        }
+        p {
+            color: var(--text-secondary);
+            font-size: 14px;
+            line-height: 1.6;
+            margin-bottom: 24px;
+        }
+        .user-box {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            margin-bottom: 24px;
+            color: var(--accent-cyan);
+        }
+        .btn-group {
+            display: flex;
+            gap: 12px;
+            justify-content: center;
+        }
+        .btn {
+            display: inline-block;
+            background: #232d3f;
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .btn:hover { background: #334155; }
+        .btn-primary { background: #5865F2; }
+        .btn-primary:hover { background: #4752C4; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🚫</div>
+        <h1>403 Forbidden</h1>
+        <p>{{.ErrorMessage}}</p>
+        {{if .Username}}
+        <div class="user-box">
+            Account: <strong>{{.Username}}</strong> &bull; Role: <span style="color: #f59e0b;">{{.Role}}</span>
+        </div>
+        {{end}}
+        <div class="btn-group">
+            <a href="/auth/logout" class="btn">Log Out</a>
+            <a href="/auth/login" class="btn btn-primary">Switch Discord Account</a>
+        </div>
     </div>
 </body>
 </html>`))

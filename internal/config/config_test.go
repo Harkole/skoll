@@ -34,6 +34,12 @@ func TestConfigDefaults(t *testing.T) {
 	if cfg.HTTPTimeout != 15*time.Second {
 		t.Errorf("expected 15s timeout, got %v", cfg.HTTPTimeout)
 	}
+	if cfg.DiscordRedirectURI != "http://localhost:8081/auth/callback" {
+		t.Errorf("expected redirect URI http://localhost:8081/auth/callback, got %s", cfg.DiscordRedirectURI)
+	}
+	if cfg.SessionSecret == "" {
+		t.Errorf("expected non-empty default SessionSecret")
+	}
 
 	if err := cfg.Validate(false); err != nil {
 		t.Errorf("non-strict validate should pass: %v", err)
@@ -50,6 +56,8 @@ func TestConfigCustomEnv(t *testing.T) {
 	_ = os.Setenv("DISCORD_BOT_TOKEN", "bot_token_123")
 	_ = os.Setenv("DISCORD_CLIENT_ID", "client_123")
 	_ = os.Setenv("DISCORD_CLIENT_SECRET", "secret_123")
+	_ = os.Setenv("DISCORD_REDIRECT_URI", "http://custom.domain/auth/callback")
+	_ = os.Setenv("SKOLL_SESSION_SECRET", "custom_session_secret_32_bytes_long!")
 	_ = os.Setenv("FENRIR_API_URL", "http://fenrir.local:8080")
 	_ = os.Setenv("FENRIR_API_KEY", "fenrir_key_xyz")
 	defer func() {
@@ -58,6 +66,8 @@ func TestConfigCustomEnv(t *testing.T) {
 		_ = os.Unsetenv("DISCORD_BOT_TOKEN")
 		_ = os.Unsetenv("DISCORD_CLIENT_ID")
 		_ = os.Unsetenv("DISCORD_CLIENT_SECRET")
+		_ = os.Unsetenv("DISCORD_REDIRECT_URI")
+		_ = os.Unsetenv("SKOLL_SESSION_SECRET")
 		_ = os.Unsetenv("FENRIR_API_URL")
 		_ = os.Unsetenv("FENRIR_API_KEY")
 	}()
@@ -72,6 +82,12 @@ func TestConfigCustomEnv(t *testing.T) {
 	}
 	if cfg.DatabasePath != "custom.db" {
 		t.Errorf("expected custom.db, got %s", cfg.DatabasePath)
+	}
+	if cfg.DiscordRedirectURI != "http://custom.domain/auth/callback" {
+		t.Errorf("expected custom redirect URI, got %s", cfg.DiscordRedirectURI)
+	}
+	if cfg.SessionSecret != "custom_session_secret_32_bytes_long!" {
+		t.Errorf("expected custom session secret, got %s", cfg.SessionSecret)
 	}
 	if err := cfg.Validate(true); err != nil {
 		t.Errorf("strict validate should succeed with all keys: %v", err)

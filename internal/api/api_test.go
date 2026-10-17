@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
@@ -182,23 +183,53 @@ func TestDiscordOAuthCallback(t *testing.T) {
 }
 
 func TestAdminDashboardAndRoleUpdate(t *testing.T) {
-	server, db, cfg, _ := setupTestAPIServer(t)
+	server, db, _, _ := setupTestAPIServer(t)
 	ctx := context.Background()
 
 	// Seed users
 	_, _ = db.UpsertUser(ctx, "d1", "Alice", database.RoleAdmin)
 	u2, _ := db.UpsertUser(ctx, "d2", "Bob", database.RoleViewer)
 
-	// 1. Unauthenticated request to /admin -> shows login form
+	// 1. Unauthenticated request to /admin -> redirects to /login
 	reqUnauth := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	wUnauth := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wUnauth, reqUnauth)
-	if !strings.Contains(wUnauth.Body.String(), "Sköll Admin Panel") {
-		t.Errorf("expected login card for unauthenticated admin access")
+	if wUnauth.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 redirect to /login for unauthenticated admin access, got %d", wUnauth.Code)
+	}
+	if loc := wUnauth.Header().Get("Location"); loc != "/login" {
+		t.Errorf("expected redirect location /login, got %s", loc)
 	}
 
-	// 2. Authenticated request with query parameter key
-	reqAuth := httptest.NewRequest(http.MethodGet, "/admin?key="+cfg.AdminKey, nil)
+	// Clean login page renders with "Login with Discord" button
+	reqLogin := httptest.NewRequest(http.MethodGet, "/login", nil)
+	wLogin := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wLogin, reqLogin)
+	if wLogin.Code != http.StatusOK {
+		t.Errorf("expected 200 on /login, got %d", wLogin.Code)
+	}
+	if !strings.Contains(wLogin.Body.String(), "Login with Discord") {
+		t.Errorf("expected Login with Discord button on login page, got: %s", wLogin.Body.String())
+	}
+
+	// 2. Authenticated request with session cookie
+	aliceUser, _ := db.GetUserByDiscordID(ctx, "d1")
+	sessionEnc, err := server.sessions.Encrypt(&SessionData{
+		DiscordUserID: aliceUser.DiscordID,
+		Username:      aliceUser.Username,
+		Role:          aliceUser.Role,
+		CreatedAt:     time.Now().Unix(),
+		ExpiresAt:     time.Now().Add(24 * time.Hour).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("failed to encrypt session: %v", err)
+	}
+
+	reqAuth := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	reqAuth.AddCookie(&http.Cookie{
+		Name:  SessionCookieName,
+		Value: sessionEnc,
+	})
 	wAuth := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wAuth, reqAuth)
 	if wAuth.Code != http.StatusOK {
@@ -209,14 +240,17 @@ func TestAdminDashboardAndRoleUpdate(t *testing.T) {
 		t.Errorf("expected users to appear in admin dashboard")
 	}
 
-	// 3. Update Bob to Operator via POST /admin/role
+	// 3. Update Bob to Operator via POST /admin/role with Alice's session cookie
 	formData := url.Values{}
 	formData.Set("user_id", fmt.Sprintf("%d", u2.ID))
 	formData.Set("role", "Operator")
-	formData.Set("key", cfg.AdminKey)
 
 	reqPost := httptest.NewRequest(http.MethodPost, "/admin/role", strings.NewReader(formData.Encode()))
 	reqPost.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqPost.AddCookie(&http.Cookie{
+		Name:  SessionCookieName,
+		Value: sessionEnc,
+	})
 	wPost := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wPost, reqPost)
 
@@ -233,10 +267,13 @@ func TestAdminDashboardAndRoleUpdate(t *testing.T) {
 		t.Errorf("expected Bob to be Operator, got %s", bobUpdated.Role)
 	}
 
-	// 4. REST API User role update
+	// 4. REST API User role update using session cookie
 	apiReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/users/%d/role", u2.ID), strings.NewReader(`{"role":"Admin"}`))
 	apiReq.Header.Set("Content-Type", "application/json")
-	apiReq.Header.Set("X-Admin-Key", cfg.AdminKey)
+	apiReq.AddCookie(&http.Cookie{
+		Name:  SessionCookieName,
+		Value: sessionEnc,
+	})
 	wAPI := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wAPI, apiReq)
 
@@ -249,17 +286,24 @@ func TestAdminDashboardAndRoleUpdate(t *testing.T) {
 		t.Errorf("expected Bob to be Admin after REST API update, got %s", bobAdmin.Role)
 	}
 
-	// 5. Audit logs endpoint
+	// 5. Audit logs endpoint and verify unified audit trail contains Alice's Discord info
 	auditReq := httptest.NewRequest(http.MethodGet, "/api/v1/audit-logs", nil)
-	auditReq.Header.Set("X-Admin-Key", cfg.AdminKey)
+	auditReq.AddCookie(&http.Cookie{
+		Name:  SessionCookieName,
+		Value: sessionEnc,
+	})
 	wAudit := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wAudit, auditReq)
 
 	if wAudit.Code != http.StatusOK {
 		t.Fatalf("expected 200 on audit logs API, got %d", wAudit.Code)
 	}
-	if !strings.Contains(wAudit.Body.String(), "role_update") {
+	auditBody := wAudit.Body.String()
+	if !strings.Contains(auditBody, "role_update") {
 		t.Errorf("expected role_update in audit logs json")
+	}
+	if !strings.Contains(auditBody, "d1") || !strings.Contains(auditBody, "Alice") {
+		t.Errorf("expected Alice's Discord ID and username in audit logs, got: %s", auditBody)
 	}
 }
 
@@ -719,5 +763,500 @@ func TestComposeAndYAMLRBACStrictAdminOnly(t *testing.T) {
 		t.Errorf("expected SUCCESS entry in audit logs")
 	}
 }
+
+func TestDiscordOAuth2LoginEndpoint(t *testing.T) {
+	server, _, cfg, _ := setupTestAPIServer(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307 temporary redirect, got %d", w.Code)
+	}
+
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "discord.com/oauth2/authorize") {
+		t.Errorf("expected Discord authorization URL, got: %s", loc)
+	}
+	if !strings.Contains(loc, "client_id="+cfg.DiscordClientID) {
+		t.Errorf("expected client_id in OAuth URL: %s", loc)
+	}
+	if !strings.Contains(loc, "scope=identify") {
+		t.Errorf("expected identify scope in OAuth URL: %s", loc)
+	}
+	if !strings.Contains(loc, "response_type=code") {
+		t.Errorf("expected response_type=code: %s", loc)
+	}
+	if !strings.Contains(loc, "state=") {
+		t.Errorf("expected state token in OAuth URL: %s", loc)
+	}
+
+	// Verify temporary oauth state cookie was set
+	cookies := w.Result().Cookies()
+	var stateCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "skoll_oauth_state" {
+			stateCookie = c
+			break
+		}
+	}
+	if stateCookie == nil || stateCookie.Value == "" {
+		t.Errorf("expected skoll_oauth_state cookie to be set")
+	}
+}
+
+func TestDiscordOAuth2CallbackWebLoginAndBootstrap(t *testing.T) {
+	server, db, _, oauth := setupTestAPIServer(t)
+	ctx := context.Background()
+
+	// Configure mock user for first login
+	oauth.FetchUserFunc = func(ctx context.Context, token string) (*DiscordUser, error) {
+		return &DiscordUser{
+			ID:         "snowflake_admin_1",
+			Username:   "InitialAdmin",
+			GlobalName: "InitialAdmin",
+		}, nil
+	}
+
+	// 1. Initiate login
+	reqLogin := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	wLogin := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wLogin, reqLogin)
+
+	parsedURL, err := url.Parse(wLogin.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("failed to parse redirect URL: %v", err)
+	}
+	stateToken := parsedURL.Query().Get("state")
+	if stateToken == "" {
+		t.Fatalf("state token missing from login redirect URL")
+	}
+
+	// 2. Discord calls /auth/callback with code and state
+	reqCallback := httptest.NewRequest(http.MethodGet, "/auth/callback?code=mock_code_1&state="+stateToken, nil)
+	wCallback := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wCallback, reqCallback)
+
+	if wCallback.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect to /admin, got %d: %s", wCallback.Code, wCallback.Body.String())
+	}
+	if loc := wCallback.Header().Get("Location"); loc != "/admin" {
+		t.Errorf("expected redirect to /admin, got %s", loc)
+	}
+
+	// Verify session cookie was set
+	cookies := wCallback.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == SessionCookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil || sessionCookie.Value == "" {
+		t.Fatalf("expected %s cookie to be set", SessionCookieName)
+	}
+	if !sessionCookie.HttpOnly {
+		t.Errorf("expected session cookie to be HttpOnly")
+	}
+
+	// Verify first user bootstrap: InitialAdmin MUST be RoleAdmin
+	user1, err := db.GetUserByDiscordID(ctx, "snowflake_admin_1")
+	if err != nil {
+		t.Fatalf("failed to find user1: %v", err)
+	}
+	if user1.Role != database.RoleAdmin {
+		t.Errorf("expected first user to receive RoleAdmin, got %s", user1.Role)
+	}
+
+	// 3. Second user logs in
+	oauth.FetchUserFunc = func(ctx context.Context, token string) (*DiscordUser, error) {
+		return &DiscordUser{
+			ID:         "snowflake_user_2",
+			Username:   "SecondUser",
+			GlobalName: "Second User",
+		}, nil
+	}
+
+	reqLogin2 := httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+	wLogin2 := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wLogin2, reqLogin2)
+	parsedURL2, _ := url.Parse(wLogin2.Header().Get("Location"))
+	stateToken2 := parsedURL2.Query().Get("state")
+
+	reqCallback2 := httptest.NewRequest(http.MethodGet, "/auth/callback?code=mock_code_2&state="+stateToken2, nil)
+	wCallback2 := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wCallback2, reqCallback2)
+
+	if wCallback2.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect for second user, got %d", wCallback2.Code)
+	}
+
+	var sessionCookie2 *http.Cookie
+	for _, c := range wCallback2.Result().Cookies() {
+		if c.Name == SessionCookieName {
+			sessionCookie2 = c
+			break
+		}
+	}
+	if sessionCookie2 == nil {
+		t.Fatalf("expected session cookie for second user")
+	}
+
+	// Second user MUST receive RoleViewer (not admin)
+	user2, err := db.GetUserByDiscordID(ctx, "snowflake_user_2")
+	if err != nil {
+		t.Fatalf("failed to find user2: %v", err)
+	}
+	if user2.Role != database.RoleViewer {
+		t.Errorf("expected second user to have RoleViewer, got %s", user2.Role)
+	}
+
+	// 4. Second user (RoleViewer) visits /admin -> MUST be blocked with 403 Forbidden!
+	reqAdminViewer := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	reqAdminViewer.AddCookie(sessionCookie2)
+	wAdminViewer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminViewer, reqAdminViewer)
+
+	if wAdminViewer.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Viewer accessing /admin, got %d", wAdminViewer.Code)
+	}
+	if !strings.Contains(wAdminViewer.Body.String(), "403 Forbidden") {
+		t.Errorf("expected 403 Forbidden page, got: %s", wAdminViewer.Body.String())
+	}
+
+	// 5. First user (RoleAdmin) visits /admin -> MUST succeed with 200 OK!
+	reqAdminFirst := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	reqAdminFirst.AddCookie(sessionCookie)
+	wAdminFirst := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminFirst, reqAdminFirst)
+
+	if wAdminFirst.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for Admin accessing /admin, got %d", wAdminFirst.Code)
+	}
+	if !strings.Contains(wAdminFirst.Body.String(), "InitialAdmin") {
+		t.Errorf("expected InitialAdmin in dashboard view")
+	}
+}
+
+func TestWebRBACRoleHierarchy(t *testing.T) {
+	server, db, _, _ := setupTestAPIServer(t)
+	ctx := context.Background()
+
+	admin, _ := db.UpsertUser(ctx, "d_admin", "AdminUser", database.RoleAdmin)
+	op, _ := db.UpsertUser(ctx, "d_op", "OperatorUser", database.RoleOperator)
+	viewer, _ := db.UpsertUser(ctx, "d_viewer", "ViewerUser", database.RoleViewer)
+
+	createCookie := func(u *database.User) *http.Cookie {
+		enc, _ := server.sessions.Encrypt(&SessionData{
+			DiscordUserID: u.DiscordID,
+			Username:      u.Username,
+			Role:          u.Role,
+			CreatedAt:     time.Now().Unix(),
+			ExpiresAt:     time.Now().Add(24 * time.Hour).Unix(),
+		})
+		return &http.Cookie{
+			Name:  SessionCookieName,
+			Value: enc,
+		}
+	}
+
+	// 1. Viewer cannot view admin dashboard (403)
+	reqViewer := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	reqViewer.AddCookie(createCookie(viewer))
+	wViewer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wViewer, reqViewer)
+	if wViewer.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Viewer on /admin, got %d", wViewer.Code)
+	}
+
+	// 2. Operator CAN view admin dashboard (200 OK)
+	reqOp := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	reqOp.AddCookie(createCookie(op))
+	wOp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOp, reqOp)
+	if wOp.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for Operator on /admin, got %d", wOp.Code)
+	}
+	if !strings.Contains(wOp.Body.String(), "OperatorUser") {
+		t.Errorf("expected OperatorUser in header")
+	}
+
+	// 3. Operator CANNOT update user roles (403 Forbidden)
+	formData := url.Values{}
+	formData.Set("user_id", fmt.Sprintf("%d", viewer.ID))
+	formData.Set("role", "Operator")
+	reqOpRole := httptest.NewRequest(http.MethodPost, "/admin/role", strings.NewReader(formData.Encode()))
+	reqOpRole.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqOpRole.AddCookie(createCookie(op))
+	wOpRole := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpRole, reqOpRole)
+	if wOpRole.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Operator updating roles, got %d", wOpRole.Code)
+	}
+
+	// 4. Admin CAN update user roles (303 Redirect)
+	reqAdminRole := httptest.NewRequest(http.MethodPost, "/admin/role", strings.NewReader(formData.Encode()))
+	reqAdminRole.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqAdminRole.AddCookie(createCookie(admin))
+	wAdminRole := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminRole, reqAdminRole)
+	if wAdminRole.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 Redirect for Admin updating roles, got %d", wAdminRole.Code)
+	}
+
+	// 5. Verify audit log has Admin's Discord identity
+	logs, err := db.ListAuditLogs(ctx, 5)
+	if err != nil || len(logs) == 0 {
+		t.Fatalf("failed to query audit logs: %v", err)
+	}
+	latest := logs[0]
+	if latest.Action != "role_update" || latest.DiscordUserID != admin.DiscordID || latest.Username != admin.Username {
+		t.Errorf("expected role_update log with admin identity, got: %+v", latest)
+	}
+}
+
+func TestWebUnifiedAuditTrailIntegration(t *testing.T) {
+	// Setup mock Fenrir server
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/compose"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/yaml/"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true}`))
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/restart"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"success":true}`))
+		default:
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		}
+	}))
+	defer fenrirServer.Close()
+
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-key", 5*time.Second)
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_audit_trail.db")
+	db, _ := database.Open(dbPath)
+	defer db.Close()
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+	ctx := context.Background()
+
+	adminUser, _ := db.UpsertUser(ctx, "discord_admin_999", "AdminSarah", database.RoleAdmin)
+	adminCookieVal, _ := server.sessions.Encrypt(&SessionData{
+		DiscordUserID: adminUser.DiscordID,
+		Username:      adminUser.Username,
+		Role:          adminUser.Role,
+		CreatedAt:     time.Now().Unix(),
+		ExpiresAt:     time.Now().Add(24 * time.Hour).Unix(),
+	})
+	adminCookie := &http.Cookie{Name: SessionCookieName, Value: adminCookieVal}
+
+	opUser, _ := db.UpsertUser(ctx, "discord_op_888", "OperatorMike", database.RoleOperator)
+	opCookieVal, _ := server.sessions.Encrypt(&SessionData{
+		DiscordUserID: opUser.DiscordID,
+		Username:      opUser.Username,
+		Role:          opUser.Role,
+		CreatedAt:     time.Now().Unix(),
+		ExpiresAt:     time.Now().Add(24 * time.Hour).Unix(),
+	})
+	opCookie := &http.Cookie{Name: SessionCookieName, Value: opCookieVal}
+
+	// 1. Compose Update via Web Session -> Must record AdminSarah's Discord ID & Username
+	composeYAML := "version: '3.8'\nservices:\n  app:\n    image: nginx:latest\n"
+	reqCompose := httptest.NewRequest(http.MethodPut, "/api/v1/projects/production-stack/compose", strings.NewReader(composeYAML))
+	reqCompose.Header.Set("Content-Type", "text/yaml")
+	reqCompose.AddCookie(adminCookie)
+	wCompose := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wCompose, reqCompose)
+	if wCompose.Code != http.StatusOK {
+		t.Fatalf("expected 200 on compose update, got %d: %s", wCompose.Code, wCompose.Body.String())
+	}
+
+	// 2. YAML Edit via Web Session -> Must record AdminSarah's Discord ID & Username
+	yamlContent := "setting: enabled\n"
+	reqYAML := httptest.NewRequest(http.MethodPut, "/api/v1/projects/production-stack/yaml/app.yaml", strings.NewReader(yamlContent))
+	reqYAML.Header.Set("Content-Type", "text/yaml")
+	reqYAML.AddCookie(adminCookie)
+	wYAML := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wYAML, reqYAML)
+	if wYAML.Code != http.StatusOK {
+		t.Fatalf("expected 200 on yaml update, got %d: %s", wYAML.Code, wYAML.Body.String())
+	}
+
+	// 3. Stack Restart via Web Session (OperatorMike) -> Must record "server_restart" matching Discord bot format!
+	reqRestart := httptest.NewRequest(http.MethodPost, "/api/v1/stacks/production-stack/restart", nil)
+	reqRestart.AddCookie(opCookie)
+	wRestart := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wRestart, reqRestart)
+	if wRestart.Code != http.StatusOK {
+		t.Fatalf("expected 200 on stack restart, got %d: %s", wRestart.Code, wRestart.Body.String())
+	}
+
+	// 4. Verify all audit log entries
+	logs, err := db.ListAuditLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("failed to query audit logs: %v", err)
+	}
+
+	var foundRestart, foundCompose, foundYAML bool
+	for _, l := range logs {
+		// Verify none of them fell back to generic "administrator"
+		if l.Username == "administrator" {
+			t.Errorf("unexpected generic 'administrator' in audit log: %+v", l)
+		}
+
+		if l.Action == "server_restart" && l.TargetProject == "production-stack" {
+			foundRestart = true
+			if l.DiscordUserID != opUser.DiscordID || l.Username != opUser.Username {
+				t.Errorf("server_restart had wrong user: %+v", l)
+			}
+			if l.Status != "SUCCESS" {
+				t.Errorf("server_restart status not SUCCESS: %+v", l)
+			}
+		}
+
+		if l.Action == "compose_update" && l.TargetProject == "production-stack" {
+			foundCompose = true
+			if l.DiscordUserID != adminUser.DiscordID || l.Username != adminUser.Username {
+				t.Errorf("compose_update had wrong user: %+v", l)
+			}
+			if l.Status != "SUCCESS" {
+				t.Errorf("compose_update status not SUCCESS: %+v", l)
+			}
+		}
+
+		if l.Action == "yaml_update" && l.TargetProject == "production-stack/app.yaml" {
+			foundYAML = true
+			if l.DiscordUserID != adminUser.DiscordID || l.Username != adminUser.Username {
+				t.Errorf("yaml_update had wrong user: %+v", l)
+			}
+			if l.Status != "SUCCESS" {
+				t.Errorf("yaml_update status not SUCCESS: %+v", l)
+			}
+		}
+	}
+
+	if !foundRestart {
+		t.Errorf("server_restart audit entry not found")
+	}
+	if !foundCompose {
+		t.Errorf("compose_update audit entry not found")
+	}
+	if !foundYAML {
+		t.Errorf("yaml_update audit entry not found")
+	}
+}
+
+func TestSessionManagerEncryptionAndTampering(t *testing.T) {
+	sm := NewSessionManager("test_secret_key_1234567890_abcdef")
+
+	orig := &SessionData{
+		DiscordUserID: "user_123",
+		Username:      "TestUser",
+		Role:          database.RoleAdmin,
+		CreatedAt:     time.Now().Unix(),
+		ExpiresAt:     time.Now().Add(1 * time.Hour).Unix(),
+	}
+
+	// 1. Encryption & Decryption roundtrip
+	encrypted, err := sm.Encrypt(orig)
+	if err != nil {
+		t.Fatalf("encryption failed: %v", err)
+	}
+
+	decrypted, err := sm.Decrypt(encrypted)
+	if err != nil {
+		t.Fatalf("decryption failed: %v", err)
+	}
+	if decrypted.DiscordUserID != orig.DiscordUserID || decrypted.Username != orig.Username || decrypted.Role != orig.Role {
+		t.Errorf("decrypted session does not match original: %+v", decrypted)
+	}
+
+	// 2. Tampering detection
+	rawBytes, _ := base64.URLEncoding.DecodeString(encrypted)
+	rawBytes[len(rawBytes)-1] ^= 0xFF // Flip last bit
+	tampered := base64.URLEncoding.EncodeToString(rawBytes)
+
+	if _, err := sm.Decrypt(tampered); err == nil {
+		t.Errorf("expected decryption to fail on tampered ciphertext")
+	}
+
+	// 3. Expiration detection
+	expired := &SessionData{
+		DiscordUserID: "user_123",
+		Username:      "TestUser",
+		Role:          database.RoleAdmin,
+		CreatedAt:     time.Now().Add(-2 * time.Hour).Unix(),
+		ExpiresAt:     time.Now().Add(-1 * time.Hour).Unix(),
+	}
+	encExpired, _ := sm.Encrypt(expired)
+	if _, err := sm.Decrypt(encExpired); err == nil {
+		t.Errorf("expected decryption to fail on expired session")
+	}
+}
+
+func TestAuthLogoutEndpoint(t *testing.T) {
+	server, db, _, _ := setupTestAPIServer(t)
+	ctx := context.Background()
+
+	user, _ := db.UpsertUser(ctx, "d_logout", "LogoutUser", database.RoleOperator)
+	enc, _ := server.sessions.Encrypt(&SessionData{
+		DiscordUserID: user.DiscordID,
+		Username:      user.Username,
+		Role:          user.Role,
+		CreatedAt:     time.Now().Unix(),
+		ExpiresAt:     time.Now().Add(24 * time.Hour).Unix(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/logout", nil)
+	req.AddCookie(&http.Cookie{
+		Name:  SessionCookieName,
+		Value: enc,
+	})
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect on logout, got %d", w.Code)
+	}
+	if loc := w.Header().Get("Location"); loc != "/login" {
+		t.Errorf("expected redirect to /login, got %s", loc)
+	}
+
+	// Verify cookie was cleared
+	var clearedCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == SessionCookieName {
+			clearedCookie = c
+			break
+		}
+	}
+	if clearedCookie == nil || clearedCookie.MaxAge != -1 {
+		t.Errorf("expected session cookie to have MaxAge -1")
+	}
+
+	// Verify audit log
+	logs, err := db.ListAuditLogs(ctx, 5)
+	if err != nil || len(logs) == 0 {
+		t.Fatalf("expected audit log for logout")
+	}
+	if logs[0].Action != "logout" || logs[0].Username != "LogoutUser" {
+		t.Errorf("unexpected audit log: %+v", logs[0])
+	}
+}
+
 
 

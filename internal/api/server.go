@@ -3,7 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,7 @@ type Server struct {
 	db           *database.DB
 	fenrirClient *fenrir.Client
 	oauth        OAuthExchanger
+	sessions     *SessionManager
 	mux          *http.ServeMux
 	httpServer   *http.Server
 }
@@ -36,11 +39,17 @@ func NewServer(cfg *config.Config, db *database.DB, fenrirClient *fenrir.Client,
 		oauth = NewDefaultDiscordOAuth(cfg.DiscordClientID, cfg.DiscordClientSecret, cfg.DiscordRedirectURI, cfg.HTTPTimeout)
 	}
 
+	sessionSecret := cfg.SessionSecret
+	if sessionSecret == "" {
+		sessionSecret = cfg.DiscordClientSecret + ":" + cfg.AdminKey
+	}
+
 	s := &Server{
 		cfg:          cfg,
 		db:           db,
 		fenrirClient: fenrirClient,
 		oauth:        oauth,
+		sessions:     NewSessionManager(sessionSecret),
 		mux:          http.NewServeMux(),
 	}
 
@@ -79,11 +88,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 
-	// OAuth2 Linking Flow
-	s.mux.HandleFunc("GET /link", s.handleLinkRedirect)
+	// Web Login & Discord OAuth2 Endpoints
+	s.mux.HandleFunc("GET /login", s.handleLoginPage)
+	s.mux.HandleFunc("GET /auth/login", s.handleAuthLogin)
+	s.mux.HandleFunc("GET /auth/callback", s.handleDiscordCallback)
 	s.mux.HandleFunc("GET /auth/discord/callback", s.handleDiscordCallback)
+	s.mux.HandleFunc("GET /auth/logout", s.handleAuthLogout)
+	s.mux.HandleFunc("GET /link", s.handleLinkRedirect)
 
-	// Admin Control Panel
+	// Admin Control Panel (Web Routes)
 	s.mux.HandleFunc("GET /admin", s.handleAdminDashboard)
 	s.mux.HandleFunc("GET /admin/stacks", s.handleAdminStacksRedirect)
 	s.mux.HandleFunc("GET /admin/compose", s.handleAdminGetCompose)
@@ -93,8 +106,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /admin/yaml", s.handleAdminUpdateYAML)
 	s.mux.HandleFunc("PUT /admin/yaml", s.handleAdminUpdateYAML)
 	s.mux.HandleFunc("POST /admin/role", s.handleAdminRoleUpdate)
+	s.mux.HandleFunc("POST /admin/stacks/action", s.handleAdminStackAction)
 
-	// Admin REST API
+	// Admin REST API & Stack Operations
 	s.mux.HandleFunc("GET /api/v1/users", s.handleAPIListUsers)
 	s.mux.HandleFunc("POST /api/v1/users/{id}/role", s.handleAPIUpdateRole)
 	s.mux.HandleFunc("GET /api/v1/audit-logs", s.handleAPIListAuditLogs)
@@ -106,6 +120,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/projects/{name}/yaml/{filename}", s.handleAPIGetStackYAML)
 	s.mux.HandleFunc("PUT /api/v1/stacks/{name}/yaml/{filename}", s.handleAPIUpdateStackYAML)
 	s.mux.HandleFunc("PUT /api/v1/projects/{name}/yaml/{filename}", s.handleAPIUpdateStackYAML)
+	s.mux.HandleFunc("POST /api/v1/stacks/{name}/restart", s.handleAPIStackRestart)
+	s.mux.HandleFunc("POST /api/v1/stacks/{name}/start", s.handleAPIStackStart)
+	s.mux.HandleFunc("POST /api/v1/stacks/{name}/stop", s.handleAPIStackStop)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +134,63 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLinkRedirect initiates Discord OAuth authorization.
+// handleLoginPage renders the clean login page featuring the "Login with Discord" button.
+func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	// If already authenticated with Operator or Admin role, redirect directly to /admin
+	if user, err := s.getSessionUser(r); err == nil && user != nil {
+		if user.Role.CanExecute(database.RoleOperator) {
+			http.Redirect(w, r, "/admin", http.StatusSeeOther)
+			return
+		}
+	}
+
+	errMsg := r.URL.Query().Get("error")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = loginTemplate.Execute(w, map[string]any{
+		"ErrorMessage": errMsg,
+	})
+}
+
+// handleAuthLogin redirects users to Discord's OAuth2 authorization URL with the identify scope.
+func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Generate a cryptographically secure 32-byte state token
+	b := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		s.renderError(w, http.StatusInternalServerError, "Failed to generate OAuth state token")
+		return
+	}
+	stateToken := hex.EncodeToString(b)
+
+	// Save ephemeral state token in DB (empty DiscordUserID signifies web login)
+	if err := s.db.CreateLinkState(ctx, stateToken, "", 10*time.Minute); err != nil {
+		s.renderError(w, http.StatusInternalServerError, "Failed to initialize login state")
+		return
+	}
+
+	// Set temporary state cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "skoll_oauth_state",
+		Value:    stateToken,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.isRequestSecure(r),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   600, // 10 minutes
+	})
+
+	discordAuthURL := fmt.Sprintf(
+		"https://discord.com/oauth2/authorize?client_id=%s&response_type=code&scope=identify&state=%s&redirect_uri=%s",
+		url.QueryEscape(s.cfg.DiscordClientID),
+		url.QueryEscape(stateToken),
+		url.QueryEscape(s.cfg.DiscordRedirectURI),
+	)
+
+	http.Redirect(w, r, discordAuthURL, http.StatusTemporaryRedirect)
+}
+
+// handleLinkRedirect initiates Discord OAuth authorization for the Discord bot /link flow.
 func (s *Server) handleLinkRedirect(w http.ResponseWriter, r *http.Request) {
 	state := strings.TrimSpace(r.URL.Query().Get("state"))
 	if state == "" {
@@ -125,7 +198,6 @@ func (s *Server) handleLinkRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build Discord OAuth2 URL
 	discordAuthURL := fmt.Sprintf(
 		"https://discord.com/oauth2/authorize?client_id=%s&response_type=code&scope=identify&state=%s&redirect_uri=%s",
 		url.QueryEscape(s.cfg.DiscordClientID),
@@ -136,7 +208,8 @@ func (s *Server) handleLinkRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, discordAuthURL, http.StatusTemporaryRedirect)
 }
 
-// handleDiscordCallback processes Discord OAuth2 callback, exchanges code, and upserts user.
+// handleDiscordCallback handles the authorization code exchange, fetches the Discord profile,
+// establishes an encrypted secure HTTP-only session cookie, and directs the user to /admin.
 func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -154,14 +227,14 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Consume state token atomically (validates expiry and prevents replay)
+	// 1. Consume state token atomically (validates expiry and prevents replay attacks)
 	linkState, err := s.db.ConsumeLinkState(ctx, stateToken)
 	if err != nil {
-		s.renderError(w, http.StatusBadRequest, "Invalid or expired link session. Please request a new link with /link in Discord.")
+		s.renderError(w, http.StatusBadRequest, "Invalid or expired login session. Please try logging in again.")
 		return
 	}
 
-	// 2. Exchange code for OAuth2 Access Token
+	// 2. Exchange authorization code for OAuth2 Access Token
 	accessToken, err := s.oauth.ExchangeCode(ctx, code)
 	if err != nil {
 		log.Printf("[OAuth] Exchange failed: %v", err)
@@ -177,14 +250,14 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If linkState was targeted to a specific user, verify they match
+	// If linkState was targeted to a specific user (/link command), verify identity matches
 	if linkState.DiscordUserID != "" && linkState.DiscordUserID != discordUser.ID {
 		_ = s.db.RecordAuditLog(ctx, discordUser.ID, discordUser.DisplayName(), "oauth_link_attempt", "security", "UNAUTHORIZED")
 		s.renderError(w, http.StatusForbidden, "Discord user mismatch: this link token was generated for a different Discord user.")
 		return
 	}
 
-	// 4. Upsert user in database
+	// 4. Upsert user in database. First user bootstrap automatically grants Admin role.
 	user, err := s.db.UpsertUser(ctx, discordUser.ID, discordUser.DisplayName(), database.RoleViewer)
 	if err != nil {
 		log.Printf("[OAuth] Upsert failed: %v", err)
@@ -192,21 +265,85 @@ func (s *Server) handleDiscordCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Record audit log entry
-	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "account_linked", "system", "SUCCESS")
+	// 5. Establish encrypted, secure HTTP-only session cookie
+	if err := s.sessions.SetSessionCookie(w, user, s.isRequestSecure(r)); err != nil {
+		log.Printf("[Session] Failed to set session cookie: %v", err)
+		s.renderError(w, http.StatusInternalServerError, "Failed to establish secure session.")
+		return
+	}
 
-	// 6. Render success confirmation page
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = linkSuccessTemplate.Execute(w, map[string]any{
-		"Username": user.Username,
-		"Role":     user.Role,
+	// Clear temporary state cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "skoll_oauth_state",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   s.isRequestSecure(r),
+		MaxAge:   -1,
 	})
+
+	// 6. Record unified audit log entry
+	actionName := "login"
+	if linkState.DiscordUserID != "" {
+		actionName = "account_linked"
+	}
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, actionName, "system", "SUCCESS")
+
+	// 7. Route user:
+	if linkState.DiscordUserID != "" {
+		// Bot linking confirmation view
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_ = linkSuccessTemplate.Execute(w, map[string]any{
+			"Username": user.Username,
+			"Role":     user.Role,
+		})
+		return
+	}
+
+	// Web-initiated login -> redirect to Admin control panel
+	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
-// verifyAdminAuth checks admin credentials via query, header, cookie, or basic auth.
+// handleAuthLogout terminates the session and redirects to the login page.
+func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if user, err := s.getSessionUser(r); err == nil && user != nil {
+		_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "logout", "system", "SUCCESS")
+	}
+	s.sessions.ClearSessionCookie(w, s.isRequestSecure(r))
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}
+
+// getSessionUser extracts and verifies the active user identity against the database.
+func (s *Server) getSessionUser(r *http.Request) (*database.User, error) {
+	session, err := s.sessions.GetSession(r)
+	if err != nil {
+		return nil, err
+	}
+	// Always look up current role and status directly in the database
+	user, err := s.db.GetUserByDiscordID(r.Context(), session.DiscordUserID)
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+func (s *Server) isRequestSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	if strings.HasPrefix(strings.ToLower(s.cfg.PublicURL), "https://") {
+		return true
+	}
+	return false
+}
+
+// verifyAdminAuth provides fallback verification for automated API/CLI tooling with AdminKey.
 func (s *Server) verifyAdminAuth(r *http.Request) bool {
 	if s.cfg.AdminKey == "" {
-		return true // If not configured, allow access
+		return false
 	}
 
 	// 1. Check Query parameter or Form Value
@@ -223,14 +360,7 @@ func (s *Server) verifyAdminAuth(r *http.Request) bool {
 		}
 	}
 
-	// 3. Check Cookie
-	if cookie, err := r.Cookie("skoll_admin_key"); err == nil {
-		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(s.cfg.AdminKey)) == 1 {
-			return true
-		}
-	}
-
-	// 4. Check HTTP Basic Auth (username "admin", password = adminKey)
+	// 3. Check HTTP Basic Auth (username "admin", password = adminKey)
 	if _, pass, ok := r.BasicAuth(); ok {
 		if subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminKey)) == 1 {
 			return true
@@ -240,26 +370,33 @@ func (s *Server) verifyAdminAuth(r *http.Request) bool {
 	return false
 }
 
-// handleAdminDashboard renders the role management table and audit feed.
+// handleAdminDashboard renders the role management table and audit feed for Operator+ users.
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = adminLoginTemplate.Execute(w, nil)
+	ctx := r.Context()
+
+	user, err := s.getSessionUser(r)
+	if err != nil || user == nil {
+		// Fallback for automated test suites or CLI integrations using AdminKey
+		if s.verifyAdminAuth(r) {
+			user = &database.User{
+				DiscordID: "system_admin",
+				Username:  "administrator",
+				Role:      database.RoleAdmin,
+			}
+		} else {
+			// Unauthenticated -> redirect to clean login page with "Login with Discord" button
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+	}
+
+	// Verify that the logged-in user possesses the required Admin/Operator role
+	if !user.Role.CanExecute(database.RoleOperator) {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "admin_access", "dashboard", "UNAUTHORIZED")
+		s.renderForbidden(w, user, "Operator or Admin role required to access the Sköll Control Panel.")
 		return
 	}
 
-	// Set cookie so navigation doesn't require entering key on every click
-	if key := r.URL.Query().Get("key"); key != "" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     "skoll_admin_key",
-			Value:    key,
-			Path:     "/",
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		})
-	}
-
-	ctx := r.Context()
 	users, err := s.db.ListUsers(ctx)
 	if err != nil {
 		http.Error(w, "Failed to load users: "+err.Error(), http.StatusInternalServerError)
@@ -318,6 +455,7 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := map[string]any{
+		"CurrentUser":        user,
 		"Users":              users,
 		"AuditLogs":          logs,
 		"Projects":           projects,
@@ -337,10 +475,13 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	_ = adminTemplate.Execute(w, data)
 }
 
-// handleAdminRoleUpdate handles form submissions from the Admin UI.
+// handleAdminRoleUpdate handles form submissions from the Admin UI to change user roles.
 func (s *Server) handleAdminRoleUpdate(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+	ctx := r.Context()
+
+	// Verify acting user has Administrator role
+	actingUser, ok := s.checkAdminRBAC(w, r, "role_update", "roles")
+	if !ok {
 		return
 	}
 
@@ -351,7 +492,6 @@ func (s *Server) handleAdminRoleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	idStr := r.FormValue("user_id")
 	roleStr := r.FormValue("role")
-	adminKey := r.FormValue("key")
 
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
@@ -365,7 +505,6 @@ func (s *Server) handleAdminRoleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx := r.Context()
 	targetUser, err := s.db.GetUserByID(ctx, id)
 	if err != nil {
 		http.Error(w, "User not found", http.StatusNotFound)
@@ -377,22 +516,18 @@ func (s *Server) handleAdminRoleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Audit record
-	_ = s.db.RecordAuditLog(ctx, "admin_ui", "administrator", "role_update", fmt.Sprintf("%s (%s -> %s)", targetUser.Username, targetUser.Role, targetRole), "SUCCESS")
+	// Unified Audit record with authenticated Discord username and ID from session
+	_ = s.db.RecordAuditLog(ctx, actingUser.DiscordID, actingUser.Username, "role_update", fmt.Sprintf("%s (%s -> %s)", targetUser.Username, targetUser.Role, targetRole), "SUCCESS")
 
 	// Redirect back with notification
-	redirectURL := fmt.Sprintf("/admin?notification=Role+for+%s+updated+to+%s", url.QueryEscape(targetUser.Username), url.QueryEscape(string(targetRole)))
-	if adminKey != "" {
-		redirectURL += "&key=" + url.QueryEscape(adminKey)
-	}
+	redirectURL := fmt.Sprintf("/admin?tab=users&notification=Role+for+%s+updated+to+%s", url.QueryEscape(targetUser.Username), url.QueryEscape(string(targetRole)))
 	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }
 
 // REST API Handlers
 
 func (s *Server) handleAPIListUsers(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	if _, ok := s.checkAdminRBAC(w, r, "list_users", "users"); !ok {
 		return
 	}
 	users, err := s.db.ListUsers(r.Context())
@@ -405,8 +540,8 @@ func (s *Server) handleAPIListUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIUpdateRole(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	actingUser, ok := s.checkAdminRBAC(w, r, "role_update", "roles")
+	if !ok {
 		return
 	}
 
@@ -431,18 +566,26 @@ func (s *Server) handleAPIUpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.db.UpdateUserRole(r.Context(), id, targetRole); err != nil {
+	ctx := r.Context()
+	targetUser, err := s.db.GetUserByID(ctx, id)
+	if err != nil {
+		http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+		return
+	}
+
+	if err := s.db.UpdateUserRole(ctx, id, targetRole); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusInternalServerError)
 		return
 	}
+
+	_ = s.db.RecordAuditLog(ctx, actingUser.DiscordID, actingUser.Username, "role_update", fmt.Sprintf("%s (%s -> %s)", targetUser.Username, targetUser.Role, targetRole), "SUCCESS")
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "role": targetRole})
 }
 
 func (s *Server) handleAPIListAuditLogs(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	if _, ok := s.checkOperatorRBAC(w, r, "list_audit_logs", "audit"); !ok {
 		return
 	}
 	limit := 50
@@ -468,8 +611,41 @@ func (s *Server) renderError(w http.ResponseWriter, status int, msg string) {
 	})
 }
 
+func (s *Server) renderForbidden(w http.ResponseWriter, user *database.User, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusForbidden)
+	_ = forbiddenTemplate.Execute(w, map[string]any{
+		"ErrorMessage": msg,
+		"Username":     user.Username,
+		"Role":         user.Role,
+	})
+}
+
+func (s *Server) respondForbidden(w http.ResponseWriter, r *http.Request, msg string) {
+	if strings.Contains(r.Header.Get("Accept"), "text/html") && !strings.Contains(r.Header.Get("Accept"), "application/json") {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusForbidden)
+		_ = forbiddenTemplate.Execute(w, map[string]any{
+			"ErrorMessage": msg,
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":  msg,
+		"status": http.StatusForbidden,
+	})
+}
+
 // handleAdminStacksRedirect redirects /admin/stacks to /admin?tab=stacks.
 func (s *Server) handleAdminStacksRedirect(w http.ResponseWriter, r *http.Request) {
+	if user, err := s.getSessionUser(r); err != nil || user == nil {
+		if !s.verifyAdminAuth(r) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+	}
 	target := "/admin?tab=stacks"
 	if key := r.URL.Query().Get("key"); key != "" {
 		target += "&key=" + url.QueryEscape(key)
@@ -479,8 +655,7 @@ func (s *Server) handleAdminStacksRedirect(w http.ResponseWriter, r *http.Reques
 
 // handleAdminGetCompose retrieves the compose YAML for a stack in JSON format for the admin modal.
 func (s *Server) handleAdminGetCompose(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	if _, ok := s.checkOperatorRBAC(w, r, "compose_read", "modal"); !ok {
 		return
 	}
 	name := strings.TrimSpace(r.URL.Query().Get("name"))
@@ -506,8 +681,7 @@ func (s *Server) handleAdminGetCompose(w http.ResponseWriter, r *http.Request) {
 
 // handleAPIListStacks lists all Docker Compose stacks registered with Fenrir.
 func (s *Server) handleAPIListStacks(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	if _, ok := s.checkOperatorRBAC(w, r, "list_stacks", "stacks"); !ok {
 		return
 	}
 	if s.fenrirClient == nil {
@@ -549,13 +723,31 @@ func (s *Server) handleAPIGetStackCompose(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// checkAdminRBAC verifies that the caller has Administrator privileges.
-// If the caller is an Operator, Viewer, Unlinked user, or fails admin authentication,
-// it responds with HTTP 403 Forbidden and returns (nil, false).
+// checkAdminRBAC verifies that caller possesses the Administrator role.
 func (s *Server) checkAdminRBAC(w http.ResponseWriter, r *http.Request, action, target string) (*database.User, bool) {
+	return s.checkRequiredRole(w, r, database.RoleAdmin, action, target)
+}
+
+// checkOperatorRBAC verifies that caller possesses at least Operator privileges.
+func (s *Server) checkOperatorRBAC(w http.ResponseWriter, r *http.Request, action, target string) (*database.User, bool) {
+	return s.checkRequiredRole(w, r, database.RoleOperator, action, target)
+}
+
+// checkRequiredRole validates the caller's identity and checks database permissions.
+func (s *Server) checkRequiredRole(w http.ResponseWriter, r *http.Request, requiredRole database.Role, action, target string) (*database.User, bool) {
 	ctx := r.Context()
 
-	// 1. Check for explicit user identification (headers, query, form)
+	// 1. Check encrypted HTTP-only session cookie first
+	if sessionUser, err := s.getSessionUser(r); err == nil && sessionUser != nil {
+		if !sessionUser.Role.CanExecute(requiredRole) {
+			_ = s.db.RecordAuditLog(ctx, sessionUser.DiscordID, sessionUser.Username, action, target, "UNAUTHORIZED")
+			s.respondForbidden(w, r, fmt.Sprintf("forbidden: user role is %s, %s role required", sessionUser.Role, requiredRole))
+			return nil, false
+		}
+		return sessionUser, true
+	}
+
+	// 2. Check for explicit user identification (headers, query, form) for REST API callers
 	discordUserID := strings.TrimSpace(r.Header.Get("X-Discord-User-ID"))
 	if discordUserID == "" {
 		discordUserID = strings.TrimSpace(r.Header.Get("X-Discord-ID"))
@@ -570,7 +762,7 @@ func (s *Server) checkAdminRBAC(w http.ResponseWriter, r *http.Request, action, 
 		discordUserID = strings.TrimSpace(r.URL.Query().Get("user_id"))
 	}
 
-	// 2. Check for explicit role header or query
+	// Check for explicit role header or query
 	roleHeader := strings.TrimSpace(r.Header.Get("X-Role"))
 	if roleHeader == "" {
 		roleHeader = strings.TrimSpace(r.Header.Get("X-User-Role"))
@@ -581,76 +773,53 @@ func (s *Server) checkAdminRBAC(w http.ResponseWriter, r *http.Request, action, 
 
 	if roleHeader != "" {
 		parsedRole := database.ParseRole(roleHeader)
-		if parsedRole != database.RoleAdmin {
+		if !parsedRole.CanExecute(requiredRole) {
 			_ = s.db.RecordAuditLog(ctx, discordUserID, roleHeader, action, target, "UNAUTHORIZED")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"error":  fmt.Sprintf("forbidden: role '%s' does not have admin permissions", roleHeader),
-				"status": http.StatusForbidden,
-			})
+			s.respondForbidden(w, r, fmt.Sprintf("forbidden: role '%s' does not have %s permissions", roleHeader, requiredRole))
 			return nil, false
 		}
 	}
 
-	// 3. If a Discord User ID is provided, look up the user in database
+	// Look up user in database if Discord User ID is provided
 	if discordUserID != "" {
 		user, err := s.db.GetUserByDiscordID(ctx, discordUserID)
 		if err != nil {
-			// Also try numeric ID lookup if possible
 			if numID, parseErr := strconv.ParseInt(discordUserID, 10, 64); parseErr == nil {
 				user, err = s.db.GetUserByID(ctx, numID)
 			}
 		}
 
 		if err != nil {
-			// User not found -> Unlinked user
 			_ = s.db.RecordAuditLog(ctx, discordUserID, "unlinked", action, target, "UNAUTHORIZED")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"error":  "forbidden: unlinked user, admin role required",
-				"status": http.StatusForbidden,
-			})
+			s.respondForbidden(w, r, fmt.Sprintf("forbidden: unlinked user, %s role required", requiredRole))
 			return nil, false
 		}
 
-		if user.Role != database.RoleAdmin {
-			// Operator, Viewer, or Unlinked
+		if !user.Role.CanExecute(requiredRole) {
 			_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, action, target, "UNAUTHORIZED")
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"error":  fmt.Sprintf("forbidden: user role is %s, admin role required", user.Role),
-				"status": http.StatusForbidden,
-			})
+			s.respondForbidden(w, r, fmt.Sprintf("forbidden: user role is %s, %s role required", user.Role, requiredRole))
 			return nil, false
 		}
 
 		return user, true
 	}
 
-	// 4. No Discord User ID provided; check Admin Secret credentials
+	// 3. Check Admin Secret credentials (for automated test harness / scripts)
 	if s.verifyAdminAuth(r) {
 		return &database.User{
-			Username: "administrator",
-			Role:     database.RoleAdmin,
+			DiscordID: "system_admin",
+			Username:  "administrator",
+			Role:      database.RoleAdmin,
 		}, true
 	}
 
-	// 5. Neither valid user nor admin credentials -> 403 Forbidden
+	// 4. Unauthorized
 	_ = s.db.RecordAuditLog(ctx, "anonymous", "unlinked", action, target, "UNAUTHORIZED")
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusForbidden)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error":  "forbidden: admin privileges required",
-		"status": http.StatusForbidden,
-	})
+	s.respondForbidden(w, r, fmt.Sprintf("forbidden: %s privileges required", requiredRole))
 	return nil, false
 }
 
 // extractYAMLContent parses compose or configuration YAML from raw text, form fields, or JSON envelopes.
-// It supports JSON bodies containing compose, yaml, content, or composeContent keys.
 func extractYAMLContent(r *http.Request) (string, error) {
 	contentType := strings.ToLower(r.Header.Get("Content-Type"))
 
@@ -924,9 +1093,6 @@ func (s *Server) handleAdminUpdateCompose(w http.ResponseWriter, r *http.Request
 	// If standard HTML form submit
 	if r.Header.Get("Accept") != "" && strings.Contains(r.Header.Get("Accept"), "text/html") && !strings.Contains(r.Header.Get("Accept"), "application/json") {
 		redirectURL := fmt.Sprintf("/admin?tab=stacks&notification=Compose+updated+successfully+for+%s", url.QueryEscape(name))
-		if key := r.FormValue("key"); key != "" {
-			redirectURL += "&key=" + url.QueryEscape(key)
-		}
 		http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 		return
 	}
@@ -979,7 +1145,7 @@ func (s *Server) handleAdminGetYAML(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAdminUpdateYAML(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.FormValue("name"))
 	if name == "" {
-		name = strings.TrimSpace(r.URL.Query().Get("name"))
+		name = strings.TrimSpace(r.PathValue("name"))
 	}
 	filename := strings.TrimSpace(r.FormValue("filename"))
 	if filename == "" {
@@ -1034,9 +1200,6 @@ func (s *Server) handleAdminUpdateYAML(w http.ResponseWriter, r *http.Request) {
 	// If standard HTML form submit
 	if r.Header.Get("Accept") != "" && strings.Contains(r.Header.Get("Accept"), "text/html") && !strings.Contains(r.Header.Get("Accept"), "application/json") {
 		redirectURL := fmt.Sprintf("/admin?tab=stacks&notification=YAML+file+%s+updated+for+%s", url.QueryEscape(filename), url.QueryEscape(name))
-		if key := r.FormValue("key"); key != "" {
-			redirectURL += "&key=" + url.QueryEscape(key)
-		}
 		http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 		return
 	}
@@ -1051,4 +1214,87 @@ func (s *Server) handleAdminUpdateYAML(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleAPIStackRestart handles POST /api/v1/stacks/{name}/restart.
+func (s *Server) handleAPIStackRestart(w http.ResponseWriter, r *http.Request) {
+	s.handleStackAction(w, r, "restart")
+}
 
+// handleAPIStackStart handles POST /api/v1/stacks/{name}/start.
+func (s *Server) handleAPIStackStart(w http.ResponseWriter, r *http.Request) {
+	s.handleStackAction(w, r, "start")
+}
+
+// handleAPIStackStop handles POST /api/v1/stacks/{name}/stop.
+func (s *Server) handleAPIStackStop(w http.ResponseWriter, r *http.Request) {
+	s.handleStackAction(w, r, "stop")
+}
+
+// handleAdminStackAction handles form actions from web UI.
+func (s *Server) handleAdminStackAction(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.FormValue("name"))
+	action := strings.TrimSpace(r.FormValue("action"))
+	s.executeStackOperation(w, r, name, action, true)
+}
+
+func (s *Server) handleStackAction(w http.ResponseWriter, r *http.Request, action string) {
+	name := r.PathValue("name")
+	s.executeStackOperation(w, r, name, action, false)
+}
+
+func (s *Server) executeStackOperation(w http.ResponseWriter, r *http.Request, name, action string, isWebForm bool) {
+	if name == "" {
+		http.Error(w, `{"error":"missing stack name"}`, http.StatusBadRequest)
+		return
+	}
+
+	user, ok := s.checkOperatorRBAC(w, r, "server_"+action, name)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	var err error
+	switch action {
+	case "restart":
+		err = s.fenrirClient.RestartProject(ctx, name)
+	case "start":
+		err = s.fenrirClient.StartProject(ctx, name)
+	case "stop":
+		err = s.fenrirClient.StopProject(ctx, name)
+	default:
+		http.Error(w, `{"error":"invalid stack action"}`, http.StatusBadRequest)
+		return
+	}
+
+	if err != nil {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "server_"+action, name, "FAILED")
+		if isWebForm {
+			http.Redirect(w, r, fmt.Sprintf("/admin?tab=stacks&notification=Error: %s", url.QueryEscape(err.Error())), http.StatusSeeOther)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "server_"+action, name, "SUCCESS")
+
+	if isWebForm {
+		http.Redirect(w, r, fmt.Sprintf("/admin?tab=stacks&notification=Stack %s %sed successfully", url.QueryEscape(name), url.QueryEscape(action)), http.StatusSeeOther)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"name":    name,
+		"action":  action,
+		"message": fmt.Sprintf("Stack %s %sed successfully", name, action),
+	})
+}

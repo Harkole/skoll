@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -53,14 +55,22 @@ func (c *Client) do(ctx context.Context, method, path string, body any, target a
 		}
 		bodyReader = bytes.NewReader(data)
 	}
+	return c.doRequest(ctx, method, path, "application/json", bodyReader, target)
+}
 
-	url := c.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+// doRequest sends an HTTP request with specified Content-Type and body reader.
+func (c *Client) doRequest(ctx context.Context, method, path string, contentType string, bodyReader io.Reader, target any) error {
+	requestURL := c.baseURL + path
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, bodyReader)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	} else {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("User-Agent", "Skoll-Companion/1.0")
 
 	// Set both Bearer token and X-API-Key for maximum compatibility
@@ -281,5 +291,150 @@ func ReconstructCompose(project *Project) string {
 		}
 	}
 	return sb.String()
+}
+
+// UpdateProjectCompose updates a project's compose configuration in Fenrir Daemon via PUT /api/v1/projects/{name}/compose.
+// It accepts raw YAML or JSON body with compose, yaml, content, or composeContent,
+// and supports query parameters like ?redeploy=false or ?dry_run=true.
+func (c *Client) UpdateProjectCompose(ctx context.Context, name string, content string, opts *ComposeUpdateOptions) error {
+	path := fmt.Sprintf("/api/v1/projects/%s/compose", url.PathEscape(name))
+	queryParams := url.Values{}
+
+	rawYAML := false
+	jsonField := "compose"
+
+	if opts != nil {
+		if opts.Redeploy != nil {
+			queryParams.Set("redeploy", strconv.FormatBool(*opts.Redeploy))
+		}
+		if opts.DryRun != nil {
+			queryParams.Set("dry_run", strconv.FormatBool(*opts.DryRun))
+		}
+		if opts.RawYAML {
+			rawYAML = true
+		}
+		if opts.JSONField != "" {
+			jsonField = opts.JSONField
+		}
+	}
+
+	if len(queryParams) > 0 {
+		path += "?" + queryParams.Encode()
+	}
+
+	if rawYAML {
+		return c.doRequest(ctx, http.MethodPut, path, "text/yaml", strings.NewReader(content), nil)
+	}
+
+	body := map[string]string{
+		jsonField: content,
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to marshal compose JSON payload: %w", err)
+	}
+	return c.doRequest(ctx, http.MethodPut, path, "application/json", bytes.NewReader(data), nil)
+}
+
+// UpdateProjectYAML updates an auxiliary YAML file for a project in Fenrir Daemon via PUT /api/v1/projects/{name}/yaml/{filename}.
+// It supports optional ?restart=true query parameter and raw YAML or JSON body.
+func (c *Client) UpdateProjectYAML(ctx context.Context, name, filename string, content string, opts *YAMLUpdateOptions) error {
+	path := fmt.Sprintf("/api/v1/projects/%s/yaml/%s", url.PathEscape(name), url.PathEscape(filename))
+	queryParams := url.Values{}
+
+	rawYAML := false
+	jsonField := "content"
+
+	if opts != nil {
+		if opts.Restart != nil {
+			queryParams.Set("restart", strconv.FormatBool(*opts.Restart))
+		}
+		if opts.RawYAML {
+			rawYAML = true
+		}
+		if opts.JSONField != "" {
+			jsonField = opts.JSONField
+		}
+	}
+
+	if len(queryParams) > 0 {
+		path += "?" + queryParams.Encode()
+	}
+
+	if rawYAML {
+		return c.doRequest(ctx, http.MethodPut, path, "text/yaml", strings.NewReader(content), nil)
+	}
+
+	body := map[string]string{
+		jsonField: content,
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("failed to marshal yaml JSON payload: %w", err)
+	}
+	return c.doRequest(ctx, http.MethodPut, path, "application/json", bytes.NewReader(data), nil)
+}
+
+// GetProjectYAML retrieves an auxiliary YAML configuration file for a project via GET /api/v1/projects/{name}/yaml/{filename}.
+func (c *Client) GetProjectYAML(ctx context.Context, name, filename string) (string, error) {
+	urlPath := fmt.Sprintf("/api/v1/projects/%s/yaml/%s", url.PathEscape(name), url.PathEscape(filename))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+urlPath, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to build request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Skoll-Companion/1.0")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch yaml file %s: %w", filename, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrNotFound
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return "", ErrUnauthorized
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("fenrir returned status %d fetching %s", resp.StatusCode, filename)
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var payload struct {
+		Content string `json:"content"`
+		YAML    string `json:"yaml"`
+		Compose string `json:"compose"`
+		Data    any    `json:"data"`
+	}
+	if json.Unmarshal(bodyBytes, &payload) == nil {
+		if payload.Content != "" {
+			return payload.Content, nil
+		}
+		if payload.YAML != "" {
+			return payload.YAML, nil
+		}
+		if payload.Compose != "" {
+			return payload.Compose, nil
+		}
+		if strData, ok := payload.Data.(string); ok && strData != "" {
+			return strData, nil
+		}
+		if mapData, ok := payload.Data.(map[string]any); ok {
+			for _, k := range []string{"content", "yaml", "compose"} {
+				if v, ok := mapData[k].(string); ok && v != "" {
+					return v, nil
+				}
+			}
+		}
+	}
+	return string(bodyBytes), nil
 }
 

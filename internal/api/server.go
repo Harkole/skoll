@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -84,6 +87,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /admin", s.handleAdminDashboard)
 	s.mux.HandleFunc("GET /admin/stacks", s.handleAdminStacksRedirect)
 	s.mux.HandleFunc("GET /admin/compose", s.handleAdminGetCompose)
+	s.mux.HandleFunc("POST /admin/compose", s.handleAdminUpdateCompose)
+	s.mux.HandleFunc("PUT /admin/compose", s.handleAdminUpdateCompose)
+	s.mux.HandleFunc("GET /admin/yaml", s.handleAdminGetYAML)
+	s.mux.HandleFunc("POST /admin/yaml", s.handleAdminUpdateYAML)
+	s.mux.HandleFunc("PUT /admin/yaml", s.handleAdminUpdateYAML)
 	s.mux.HandleFunc("POST /admin/role", s.handleAdminRoleUpdate)
 
 	// Admin REST API
@@ -92,6 +100,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/audit-logs", s.handleAPIListAuditLogs)
 	s.mux.HandleFunc("GET /api/v1/stacks", s.handleAPIListStacks)
 	s.mux.HandleFunc("GET /api/v1/stacks/{name}/compose", s.handleAPIGetStackCompose)
+	s.mux.HandleFunc("PUT /api/v1/stacks/{name}/compose", s.handleAPIUpdateStackCompose)
+	s.mux.HandleFunc("PUT /api/v1/projects/{name}/compose", s.handleAPIUpdateStackCompose)
+	s.mux.HandleFunc("GET /api/v1/stacks/{name}/yaml/{filename}", s.handleAPIGetStackYAML)
+	s.mux.HandleFunc("GET /api/v1/projects/{name}/yaml/{filename}", s.handleAPIGetStackYAML)
+	s.mux.HandleFunc("PUT /api/v1/stacks/{name}/yaml/{filename}", s.handleAPIUpdateStackYAML)
+	s.mux.HandleFunc("PUT /api/v1/projects/{name}/yaml/{filename}", s.handleAPIUpdateStackYAML)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -511,13 +525,12 @@ func (s *Server) handleAPIListStacks(w http.ResponseWriter, r *http.Request) {
 
 // handleAPIGetStackCompose returns raw compose file content for a named stack.
 func (s *Server) handleAPIGetStackCompose(w http.ResponseWriter, r *http.Request) {
-	if !s.verifyAdminAuth(r) {
-		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-		return
-	}
 	name := r.PathValue("name")
 	if name == "" {
 		http.Error(w, `{"error":"missing stack name"}`, http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.checkAdminRBAC(w, r, "compose_read", name); !ok {
 		return
 	}
 	if s.fenrirClient == nil {
@@ -535,4 +548,507 @@ func (s *Server) handleAPIGetStackCompose(w http.ResponseWriter, r *http.Request
 		"compose": compose,
 	})
 }
+
+// checkAdminRBAC verifies that the caller has Administrator privileges.
+// If the caller is an Operator, Viewer, Unlinked user, or fails admin authentication,
+// it responds with HTTP 403 Forbidden and returns (nil, false).
+func (s *Server) checkAdminRBAC(w http.ResponseWriter, r *http.Request, action, target string) (*database.User, bool) {
+	ctx := r.Context()
+
+	// 1. Check for explicit user identification (headers, query, form)
+	discordUserID := strings.TrimSpace(r.Header.Get("X-Discord-User-ID"))
+	if discordUserID == "" {
+		discordUserID = strings.TrimSpace(r.Header.Get("X-Discord-ID"))
+	}
+	if discordUserID == "" {
+		discordUserID = strings.TrimSpace(r.Header.Get("X-User-ID"))
+	}
+	if discordUserID == "" {
+		discordUserID = strings.TrimSpace(r.URL.Query().Get("discord_user_id"))
+	}
+	if discordUserID == "" {
+		discordUserID = strings.TrimSpace(r.URL.Query().Get("user_id"))
+	}
+
+	// 2. Check for explicit role header or query
+	roleHeader := strings.TrimSpace(r.Header.Get("X-Role"))
+	if roleHeader == "" {
+		roleHeader = strings.TrimSpace(r.Header.Get("X-User-Role"))
+	}
+	if roleHeader == "" {
+		roleHeader = strings.TrimSpace(r.URL.Query().Get("role"))
+	}
+
+	if roleHeader != "" {
+		parsedRole := database.ParseRole(roleHeader)
+		if parsedRole != database.RoleAdmin {
+			_ = s.db.RecordAuditLog(ctx, discordUserID, roleHeader, action, target, "UNAUTHORIZED")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":  fmt.Sprintf("forbidden: role '%s' does not have admin permissions", roleHeader),
+				"status": http.StatusForbidden,
+			})
+			return nil, false
+		}
+	}
+
+	// 3. If a Discord User ID is provided, look up the user in database
+	if discordUserID != "" {
+		user, err := s.db.GetUserByDiscordID(ctx, discordUserID)
+		if err != nil {
+			// Also try numeric ID lookup if possible
+			if numID, parseErr := strconv.ParseInt(discordUserID, 10, 64); parseErr == nil {
+				user, err = s.db.GetUserByID(ctx, numID)
+			}
+		}
+
+		if err != nil {
+			// User not found -> Unlinked user
+			_ = s.db.RecordAuditLog(ctx, discordUserID, "unlinked", action, target, "UNAUTHORIZED")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":  "forbidden: unlinked user, admin role required",
+				"status": http.StatusForbidden,
+			})
+			return nil, false
+		}
+
+		if user.Role != database.RoleAdmin {
+			// Operator, Viewer, or Unlinked
+			_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, action, target, "UNAUTHORIZED")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error":  fmt.Sprintf("forbidden: user role is %s, admin role required", user.Role),
+				"status": http.StatusForbidden,
+			})
+			return nil, false
+		}
+
+		return user, true
+	}
+
+	// 4. No Discord User ID provided; check Admin Secret credentials
+	if s.verifyAdminAuth(r) {
+		return &database.User{
+			Username: "administrator",
+			Role:     database.RoleAdmin,
+		}, true
+	}
+
+	// 5. Neither valid user nor admin credentials -> 403 Forbidden
+	_ = s.db.RecordAuditLog(ctx, "anonymous", "unlinked", action, target, "UNAUTHORIZED")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":  "forbidden: admin privileges required",
+		"status": http.StatusForbidden,
+	})
+	return nil, false
+}
+
+// extractYAMLContent parses compose or configuration YAML from raw text, form fields, or JSON envelopes.
+// It supports JSON bodies containing compose, yaml, content, or composeContent keys.
+func extractYAMLContent(r *http.Request) (string, error) {
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
+
+	// Check form submission if urlencoded or multipart
+	if strings.Contains(contentType, "application/x-www-form-urlencoded") || strings.Contains(contentType, "multipart/form-data") {
+		_ = r.ParseForm()
+		for _, key := range []string{"compose", "yaml", "content", "composeContent"} {
+			if val := strings.TrimSpace(r.FormValue(key)); val != "" {
+				return val, nil
+			}
+		}
+	}
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read request body: %w", err)
+	}
+	if len(bytes.TrimSpace(bodyBytes)) == 0 {
+		return "", errors.New("empty request body")
+	}
+
+	trimmed := bytes.TrimSpace(bodyBytes)
+	if strings.Contains(contentType, "application/json") || (len(trimmed) > 0 && trimmed[0] == '{') {
+		var jsonBody map[string]any
+		if err := json.Unmarshal(bodyBytes, &jsonBody); err == nil {
+			for _, key := range []string{"compose", "yaml", "content", "composeContent"} {
+				if val, ok := jsonBody[key]; ok {
+					if strVal, ok := val.(string); ok && strings.TrimSpace(strVal) != "" {
+						return strVal, nil
+					}
+				}
+			}
+			return "", errors.New("missing yaml content in JSON body (expected compose, yaml, content, or composeContent)")
+		}
+	}
+
+	return string(bodyBytes), nil
+}
+
+// handleAPIUpdateStackCompose handles PUT /api/v1/projects/{name}/compose and PUT /api/v1/stacks/{name}/compose.
+func (s *Server) handleAPIUpdateStackCompose(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "missing project or stack name"})
+		return
+	}
+
+	user, ok := s.checkAdminRBAC(w, r, "compose_update", name)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "fenrir daemon client not configured"})
+		return
+	}
+
+	content, err := extractYAMLContent(r)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	var redeploy *bool
+	if r.URL.Query().Has("redeploy") {
+		val := strings.ToLower(r.URL.Query().Get("redeploy")) == "true" || r.URL.Query().Get("redeploy") == "1"
+		redeploy = &val
+	}
+
+	var dryRun *bool
+	if r.URL.Query().Has("dry_run") {
+		val := strings.ToLower(r.URL.Query().Get("dry_run")) == "true" || r.URL.Query().Get("dry_run") == "1"
+		dryRun = &val
+	}
+
+	opts := &fenrir.ComposeUpdateOptions{
+		Redeploy: redeploy,
+		DryRun:   dryRun,
+	}
+
+	if err := s.fenrirClient.UpdateProjectCompose(r.Context(), name, content, opts); err != nil {
+		_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "compose_update", name, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "compose_update", name, "SUCCESS")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success":  true,
+		"name":     name,
+		"message":  "Compose configuration updated successfully",
+		"dry_run":  dryRun != nil && *dryRun,
+		"redeploy": redeploy == nil || *redeploy,
+	})
+}
+
+// handleAPIUpdateStackYAML handles PUT /api/v1/projects/{name}/yaml/{filename} and PUT /api/v1/stacks/{name}/yaml/{filename}.
+func (s *Server) handleAPIUpdateStackYAML(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	filename := r.PathValue("filename")
+	if name == "" || filename == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "missing project name or filename"})
+		return
+	}
+
+	target := fmt.Sprintf("%s/%s", name, filename)
+	user, ok := s.checkAdminRBAC(w, r, "yaml_update", target)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "fenrir daemon client not configured"})
+		return
+	}
+
+	content, err := extractYAMLContent(r)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	var restart *bool
+	if r.URL.Query().Has("restart") {
+		val := strings.ToLower(r.URL.Query().Get("restart")) == "true" || r.URL.Query().Get("restart") == "1"
+		restart = &val
+	}
+
+	opts := &fenrir.YAMLUpdateOptions{
+		Restart: restart,
+	}
+
+	if err := s.fenrirClient.UpdateProjectYAML(r.Context(), name, filename, content, opts); err != nil {
+		_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "yaml_update", target, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "yaml_update", target, "SUCCESS")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success":  true,
+		"name":     name,
+		"filename": filename,
+		"message":  fmt.Sprintf("YAML file '%s' updated successfully", filename),
+		"restart":  restart != nil && *restart,
+	})
+}
+
+// handleAPIGetStackYAML handles GET /api/v1/projects/{name}/yaml/{filename} and GET /api/v1/stacks/{name}/yaml/{filename}.
+func (s *Server) handleAPIGetStackYAML(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	filename := r.PathValue("filename")
+	if name == "" || filename == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "missing project name or filename"})
+		return
+	}
+
+	target := fmt.Sprintf("%s/%s", name, filename)
+	_, ok := s.checkAdminRBAC(w, r, "yaml_read", target)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": "fenrir daemon client not configured"})
+		return
+	}
+
+	content, err := s.fenrirClient.GetProjectYAML(r.Context(), name, filename)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"name":     name,
+		"filename": filename,
+		"content":  content,
+	})
+}
+
+// handleAdminUpdateCompose handles updates from the Admin UI for project compose files.
+func (s *Server) handleAdminUpdateCompose(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		name = strings.TrimSpace(r.PathValue("name"))
+	}
+	if name == "" {
+		http.Error(w, `{"error":"missing stack name"}`, http.StatusBadRequest)
+		return
+	}
+
+	user, ok := s.checkAdminRBAC(w, r, "compose_update", name)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	content, err := extractYAMLContent(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	redeployStr := r.FormValue("redeploy")
+	if redeployStr == "" {
+		redeployStr = r.URL.Query().Get("redeploy")
+	}
+	var redeploy *bool
+	if redeployStr != "" {
+		val := strings.ToLower(redeployStr) == "true" || redeployStr == "1"
+		redeploy = &val
+	}
+
+	dryRunStr := r.FormValue("dry_run")
+	if dryRunStr == "" {
+		dryRunStr = r.URL.Query().Get("dry_run")
+	}
+	var dryRun *bool
+	if dryRunStr != "" {
+		val := strings.ToLower(dryRunStr) == "true" || dryRunStr == "1"
+		dryRun = &val
+	}
+
+	opts := &fenrir.ComposeUpdateOptions{
+		Redeploy: redeploy,
+		DryRun:   dryRun,
+	}
+
+	if err := s.fenrirClient.UpdateProjectCompose(r.Context(), name, content, opts); err != nil {
+		_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "compose_update", name, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "compose_update", name, "SUCCESS")
+
+	// If standard HTML form submit
+	if r.Header.Get("Accept") != "" && strings.Contains(r.Header.Get("Accept"), "text/html") && !strings.Contains(r.Header.Get("Accept"), "application/json") {
+		redirectURL := fmt.Sprintf("/admin?tab=stacks&notification=Compose+updated+successfully+for+%s", url.QueryEscape(name))
+		if key := r.FormValue("key"); key != "" {
+			redirectURL += "&key=" + url.QueryEscape(key)
+		}
+		http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success":  true,
+		"name":     name,
+		"message":  "Compose configuration updated successfully",
+		"dry_run":  dryRun != nil && *dryRun,
+		"redeploy": redeploy == nil || *redeploy,
+	})
+}
+
+// handleAdminGetYAML loads an auxiliary YAML file for the Admin UI editor.
+func (s *Server) handleAdminGetYAML(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	filename := strings.TrimSpace(r.URL.Query().Get("filename"))
+	if name == "" || filename == "" {
+		http.Error(w, `{"error":"missing stack name or filename"}`, http.StatusBadRequest)
+		return
+	}
+
+	target := fmt.Sprintf("%s/%s", name, filename)
+	_, ok := s.checkAdminRBAC(w, r, "yaml_read", target)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	content, err := s.fenrirClient.GetProjectYAML(r.Context(), name, filename)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"name":     name,
+		"filename": filename,
+		"content":  content,
+	})
+}
+
+// handleAdminUpdateYAML saves an auxiliary YAML file from the Admin UI editor.
+func (s *Server) handleAdminUpdateYAML(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.FormValue("name"))
+	if name == "" {
+		name = strings.TrimSpace(r.URL.Query().Get("name"))
+	}
+	filename := strings.TrimSpace(r.FormValue("filename"))
+	if filename == "" {
+		filename = strings.TrimSpace(r.URL.Query().Get("filename"))
+	}
+	if name == "" || filename == "" {
+		http.Error(w, `{"error":"missing stack name or filename"}`, http.StatusBadRequest)
+		return
+	}
+
+	target := fmt.Sprintf("%s/%s", name, filename)
+	user, ok := s.checkAdminRBAC(w, r, "yaml_update", target)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	content, err := extractYAMLContent(r)
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
+		return
+	}
+
+	restartStr := r.FormValue("restart")
+	if restartStr == "" {
+		restartStr = r.URL.Query().Get("restart")
+	}
+	var restart *bool
+	if restartStr != "" {
+		val := strings.ToLower(restartStr) == "true" || restartStr == "1"
+		restart = &val
+	}
+
+	opts := &fenrir.YAMLUpdateOptions{
+		Restart: restart,
+	}
+
+	if err := s.fenrirClient.UpdateProjectYAML(r.Context(), name, filename, content, opts); err != nil {
+		_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "yaml_update", target, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(r.Context(), user.DiscordID, user.Username, "yaml_update", target, "SUCCESS")
+
+	// If standard HTML form submit
+	if r.Header.Get("Accept") != "" && strings.Contains(r.Header.Get("Accept"), "text/html") && !strings.Contains(r.Header.Get("Accept"), "application/json") {
+		redirectURL := fmt.Sprintf("/admin?tab=stacks&notification=YAML+file+%s+updated+for+%s", url.QueryEscape(filename), url.QueryEscape(name))
+		if key := r.FormValue("key"); key != "" {
+			redirectURL += "&key=" + url.QueryEscape(key)
+		}
+		http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success":  true,
+		"name":     name,
+		"filename": filename,
+		"message":  fmt.Sprintf("YAML file '%s' updated successfully", filename),
+		"restart":  restart != nil && *restart,
+	})
+}
+
 

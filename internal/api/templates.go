@@ -610,6 +610,190 @@ var (
         .btn-close:hover {
             color: var(--text-primary);
         }
+
+        /* Editor Modal Enhancements */
+        .modal-subnav {
+            background: #0f1522;
+            padding: 12px 22px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .editor-tabs {
+            display: flex;
+            gap: 8px;
+        }
+        .editor-tab {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text-secondary);
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .editor-tab:hover {
+            color: var(--text-primary);
+            background: var(--surface-hover);
+        }
+        .editor-tab.active {
+            background: #1e293b;
+            color: var(--accent-blue);
+            border-color: var(--border-light);
+            font-weight: 600;
+        }
+        .mode-controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .control-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .control-label input[type="checkbox"] {
+            cursor: pointer;
+        }
+        .input-filename {
+            background: #090d14;
+            border: 1px solid var(--border-light);
+            color: var(--text-primary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            width: 240px;
+            outline: none;
+        }
+        .input-filename:focus {
+            border-color: var(--accent-blue);
+        }
+        .btn-load-aux {
+            background: #1e293b;
+            color: var(--accent-blue);
+            border: 1px solid var(--border-light);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.15s ease;
+        }
+        .btn-load-aux:hover {
+            background: #2e3a52;
+            color: white;
+        }
+        .editor-wrapper {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+        }
+        .code-editor {
+            width: 100%;
+            min-height: 400px;
+            height: 52vh;
+            background: #090d14;
+            color: #e2e8f0;
+            border: 1px solid #1e293b;
+            border-radius: 8px;
+            padding: 16px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            resize: vertical;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            tab-size: 2;
+        }
+        .code-editor:focus {
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+        }
+        .editor-alert {
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-bottom: 12px;
+            line-height: 1.5;
+            animation: tabFadeIn 0.2s ease;
+        }
+        .editor-alert.success {
+            background: rgba(34, 197, 94, 0.15);
+            color: #4ade80;
+            border: 1px solid rgba(34, 197, 94, 0.3);
+        }
+        .editor-alert.error {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        .editor-alert.info {
+            background: rgba(56, 189, 248, 0.15);
+            color: #38bdf8;
+            border: 1px solid rgba(56, 189, 248, 0.3);
+        }
+        .btn-save {
+            background: linear-gradient(135deg, #0284c7, #2563eb);
+            color: white;
+            border: none;
+            padding: 8px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 0 15px rgba(2, 132, 199, 0.3);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-save:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 18px rgba(2, 132, 199, 0.5);
+        }
+        .btn-dryrun {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.4);
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.2s ease;
+        }
+        .btn-dryrun:hover {
+            background: rgba(245, 158, 11, 0.25);
+            color: #fcd34d;
+        }
+        .editor-status-pill {
+            font-size: 11px;
+            font-family: 'JetBrains Mono', monospace;
+            padding: 3px 8px;
+            border-radius: 4px;
+            background: #1e293b;
+            color: var(--text-secondary);
+        }
+        .editor-meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+            font-family: 'JetBrains Mono', monospace;
+        }
     </style>
 </head>
 <body>
@@ -710,9 +894,14 @@ var (
                             </td>
                             <td>
                                 <textarea id="compose-data-{{.Name}}" style="display:none;">{{.Compose}}</textarea>
-                                <button type="button" class="btn-view-compose" onclick="showComposeModal('{{.Name}}')">
-                                    <span>📄</span> View compose.yml
-                                </button>
+                                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                                    <button type="button" class="btn-view-compose" onclick="showComposeModal('{{.Name}}', 'compose')">
+                                        <span>📝</span> Edit Compose
+                                    </button>
+                                    <button type="button" class="btn-view-compose" style="color: #c084fc; border-color: rgba(168, 85, 247, 0.4);" onclick="showComposeModal('{{.Name}}', 'yaml')">
+                                        <span>⚙️</span> Edit Config
+                                    </button>
+                                </div>
                             </td>
                         </tr>
                         {{else}}
@@ -820,32 +1009,81 @@ var (
         </div>
     </div>
 
-    <!-- Compose YAML Viewer Modal -->
+    <!-- Compose & Configuration YAML Editor Modal -->
     <div id="composeModal" class="modal-overlay" onclick="onModalOverlayClick(event)">
         <div class="modal-card">
             <div class="modal-header">
-                <h3>
-                    <span>📄</span>
-                    <span>compose.yml</span>
-                    <span id="modalStackName" class="badge-system"></span>
-                </h3>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 20px;">📝</span>
+                    <div>
+                        <h3 style="margin: 0; font-size: 16px;">Stack YAML Editor</h3>
+                        <span id="modalStackName" class="badge-system" style="margin-top: 2px;"></span>
+                    </div>
+                </div>
                 <div style="display: flex; gap: 8px; align-items: center;">
                     <button type="button" id="btnCopy" class="btn-copy" onclick="copyComposeYAML()">📋 Copy YAML</button>
                     <button type="button" class="btn-close" onclick="closeComposeModal()">&times;</button>
                 </div>
             </div>
-            <div class="modal-body">
-                <pre class="code-preview"><code id="modalComposeContent">Loading compose specification...</code></pre>
+
+            <!-- Editor Mode Selector Tabs -->
+            <div class="modal-subnav">
+                <div class="editor-tabs">
+                    <button type="button" id="mode-tab-compose" class="editor-tab active" onclick="switchEditorMode('compose')">
+                        <span>🐳</span> docker-compose.yml
+                    </button>
+                    <button type="button" id="mode-tab-yaml" class="editor-tab" onclick="switchEditorMode('yaml')">
+                        <span>⚙️</span> Auxiliary Config YAML
+                    </button>
+                </div>
+                <!-- Controls for Compose mode -->
+                <div id="composeControls" class="mode-controls">
+                    <label class="control-label">
+                        <input type="checkbox" id="composeRedeploy" checked>
+                        <span>Auto-redeploy containers on save (<code>?redeploy=true</code>)</span>
+                    </label>
+                </div>
+                <!-- Controls for Auxiliary YAML mode -->
+                <div id="yamlControls" class="mode-controls" style="display: none;">
+                    <div style="display: flex; gap: 8px; align-items: center; width: 100%; flex-wrap: wrap;">
+                        <input type="text" id="auxFilename" class="input-filename" placeholder="e.g. config.yml, settings.yaml" value="config.yml">
+                        <button type="button" class="btn-load-aux" onclick="loadAuxiliaryYAML()">📥 Load File</button>
+                        <label class="control-label" style="margin-left: auto;">
+                            <input type="checkbox" id="yamlRestart" checked>
+                            <span>Restart stack on save (<code>?restart=true</code>)</span>
+                        </label>
+                    </div>
+                </div>
             </div>
+
+            <div class="modal-body">
+                <!-- Status & Validation Alert Banner -->
+                <div id="editorAlert" class="editor-alert" style="display: none;"></div>
+
+                <div class="editor-wrapper">
+                    <textarea id="modalComposeEditor" class="code-editor" spellcheck="false" placeholder="Loading YAML specification..."></textarea>
+                    <!-- Fallback / Hidden mirror for backward compatibility -->
+                    <pre class="code-preview" id="modalComposePreview" style="display: none;"><code id="modalComposeContent">Loading compose specification...</code></pre>
+                </div>
+            </div>
+
             <div class="modal-footer">
+                <div style="display: flex; align-items: center; gap: 10px; margin-right: auto;">
+                    <span id="editorStatusText" class="editor-status-pill">Ready</span>
+                    <span id="editorMetaText" class="editor-meta">Lines: 1 | Chars: 0</span>
+                </div>
+                <button type="button" id="btnDryRun" class="btn-dryrun" onclick="validateComposeDryRun()">🧪 Validate (Dry Run)</button>
+                <button type="button" id="btnSave" class="btn-save" onclick="saveYAMLContent()">💾 Save & Apply</button>
                 <button type="button" class="btn-copy" onclick="closeComposeModal()">Close</button>
             </div>
         </div>
     </div>
 
     <script>
+        let currentStackName = '';
+        let currentEditorMode = 'compose'; // 'compose' or 'yaml'
+
         function switchTab(tabName) {
-            // Update tab button classes
             const tabs = ['stacks', 'users', 'audit'];
             tabs.forEach(t => {
                 const btn = document.getElementById('tab-btn-' + t);
@@ -867,35 +1105,267 @@ var (
             } catch (e) {}
         }
 
-        function showComposeModal(stackName) {
+        function switchEditorMode(mode) {
+            currentEditorMode = mode;
+            const tabCompose = document.getElementById('mode-tab-compose');
+            const tabYAML = document.getElementById('mode-tab-yaml');
+            const composeControls = document.getElementById('composeControls');
+            const yamlControls = document.getElementById('yamlControls');
+            const btnDryRun = document.getElementById('btnDryRun');
+
+            hideEditorAlert();
+
+            if (mode === 'compose') {
+                tabCompose.classList.add('active');
+                tabYAML.classList.remove('active');
+                composeControls.style.display = 'flex';
+                yamlControls.style.display = 'none';
+                btnDryRun.style.display = 'inline-flex';
+
+                // Load compose content
+                const textarea = document.getElementById('compose-data-' + currentStackName);
+                if (textarea && textarea.value && textarea.value.trim() !== '') {
+                    setEditorContent(textarea.value);
+                } else {
+                    fetchCompose(currentStackName);
+                }
+            } else {
+                tabCompose.classList.remove('active');
+                tabYAML.classList.add('active');
+                composeControls.style.display = 'none';
+                yamlControls.style.display = 'flex';
+                btnDryRun.style.display = 'none';
+
+                loadAuxiliaryYAML();
+            }
+        }
+
+        function setEditorContent(content) {
+            const editor = document.getElementById('modalComposeEditor');
+            const preview = document.getElementById('modalComposeContent');
+            if (editor) {
+                editor.value = content;
+                updateEditorMeta();
+            }
+            if (preview) {
+                preview.textContent = content;
+            }
+        }
+
+        function updateEditorMeta() {
+            const editor = document.getElementById('modalComposeEditor');
+            const meta = document.getElementById('editorMetaText');
+            if (editor && meta) {
+                const lines = editor.value.split('\n').length;
+                const chars = editor.value.length;
+                meta.textContent = 'Lines: ' + lines + ' | Chars: ' + chars;
+            }
+        }
+
+        function showEditorAlert(type, message) {
+            const alertEl = document.getElementById('editorAlert');
+            if (!alertEl) return;
+            alertEl.className = 'editor-alert ' + type;
+            alertEl.textContent = message;
+            alertEl.style.display = 'block';
+        }
+
+        function hideEditorAlert() {
+            const alertEl = document.getElementById('editorAlert');
+            if (alertEl) {
+                alertEl.style.display = 'none';
+                alertEl.textContent = '';
+            }
+        }
+
+        function showComposeModal(stackName, initialMode) {
+            currentStackName = stackName;
             const modal = document.getElementById('composeModal');
             const nameEl = document.getElementById('modalStackName');
-            const codeEl = document.getElementById('modalComposeContent');
             const copyBtn = document.getElementById('btnCopy');
+            const statusPill = document.getElementById('editorStatusText');
 
             nameEl.textContent = stackName;
             copyBtn.textContent = '📋 Copy YAML';
+            if (statusPill) statusPill.textContent = 'Ready';
+            hideEditorAlert();
 
-            const textarea = document.getElementById('compose-data-' + stackName);
-            if (textarea && textarea.value && textarea.value.trim() !== '') {
-                codeEl.textContent = textarea.value;
-                modal.classList.add('open');
+            modal.classList.add('open');
+            switchEditorMode(initialMode || 'compose');
+        }
+
+        function fetchCompose(stackName) {
+            const statusPill = document.getElementById('editorStatusText');
+            if (statusPill) statusPill.textContent = 'Fetching...';
+
+            fetch('/admin/compose?name=' + encodeURIComponent(stackName) + '&key=' + encodeURIComponent('{{.AdminKey}}'))
+                .then(r => {
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
+                .then(data => {
+                    const content = data.compose || '# No compose definition found.';
+                    setEditorContent(content);
+                    if (statusPill) statusPill.textContent = 'Loaded';
+                })
+                .catch(err => {
+                    setEditorContent('# Failed to fetch compose definition: ' + err.message);
+                    if (statusPill) statusPill.textContent = 'Error';
+                    showEditorAlert('error', 'Failed to retrieve compose: ' + err.message);
+                });
+        }
+
+        function loadAuxiliaryYAML() {
+            const filename = (document.getElementById('auxFilename').value || 'config.yml').trim();
+            const statusPill = document.getElementById('editorStatusText');
+            if (statusPill) statusPill.textContent = 'Fetching ' + filename + '...';
+            hideEditorAlert();
+
+            fetch('/admin/yaml?name=' + encodeURIComponent(currentStackName) + '&filename=' + encodeURIComponent(filename) + '&key=' + encodeURIComponent('{{.AdminKey}}'))
+                .then(r => {
+                    if (r.status === 404) {
+                        return { content: '# New configuration file: ' + filename + '\n' };
+                    }
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    return r.json();
+                })
+                .then(data => {
+                    setEditorContent(data.content || '');
+                    if (statusPill) statusPill.textContent = 'Loaded ' + filename;
+                })
+                .catch(err => {
+                    setEditorContent('# Error fetching ' + filename + ': ' + err.message);
+                    if (statusPill) statusPill.textContent = 'Error';
+                    showEditorAlert('error', 'Could not load YAML file: ' + err.message);
+                });
+        }
+
+        function validateComposeDryRun() {
+            const editor = document.getElementById('modalComposeEditor');
+            const yamlContent = editor ? editor.value : '';
+            const statusPill = document.getElementById('editorStatusText');
+            const btn = document.getElementById('btnDryRun');
+
+            if (!yamlContent.trim()) {
+                showEditorAlert('error', 'Cannot validate an empty compose file.');
+                return;
+            }
+
+            if (statusPill) statusPill.textContent = 'Validating...';
+            btn.disabled = true;
+            btn.textContent = '⏳ Validating...';
+            hideEditorAlert();
+
+            fetch('/api/v1/projects/' + encodeURIComponent(currentStackName) + '/compose?dry_run=true', {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Admin-Key': '{{.AdminKey}}'
+                },
+                body: JSON.stringify({ compose: yamlContent })
+            })
+            .then(async r => {
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok) {
+                    throw new Error(data.error || 'HTTP ' + r.status);
+                }
+                return data;
+            })
+            .then(data => {
+                if (statusPill) statusPill.textContent = 'Valid';
+                showEditorAlert('success', '✓ Validation Passed: Compose syntax is valid for stack ' + currentStackName + ' (dry run succeeded).');
+            })
+            .catch(err => {
+                if (statusPill) statusPill.textContent = 'Invalid';
+                showEditorAlert('error', '✗ Validation Failed: ' + err.message);
+            })
+            .finally(() => {
+                btn.disabled = false;
+                btn.textContent = '🧪 Validate (Dry Run)';
+            });
+        }
+
+        function saveYAMLContent() {
+            const editor = document.getElementById('modalComposeEditor');
+            const yamlContent = editor ? editor.value : '';
+            const statusPill = document.getElementById('editorStatusText');
+            const btn = document.getElementById('btnSave');
+
+            if (!yamlContent.trim()) {
+                showEditorAlert('error', 'Cannot save empty content.');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = '⏳ Saving...';
+            if (statusPill) statusPill.textContent = 'Saving...';
+            hideEditorAlert();
+
+            if (currentEditorMode === 'compose') {
+                const redeploy = document.getElementById('composeRedeploy').checked;
+                const url = '/api/v1/projects/' + encodeURIComponent(currentStackName) + '/compose?redeploy=' + redeploy;
+
+                fetch(url, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Key': '{{.AdminKey}}'
+                    },
+                    body: JSON.stringify({ compose: yamlContent })
+                })
+                .then(async r => {
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+                    return data;
+                })
+                .then(data => {
+                    // Update cached textarea
+                    const cache = document.getElementById('compose-data-' + currentStackName);
+                    if (cache) cache.value = yamlContent;
+                    const preview = document.getElementById('modalComposeContent');
+                    if (preview) preview.textContent = yamlContent;
+
+                    if (statusPill) statusPill.textContent = 'Saved';
+                    showEditorAlert('success', '✓ Docker Compose configuration saved successfully' + (redeploy ? ' and redeployed.' : '.'));
+                })
+                .catch(err => {
+                    if (statusPill) statusPill.textContent = 'Error';
+                    showEditorAlert('error', 'Failed to save compose: ' + err.message);
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = '💾 Save & Apply';
+                });
             } else {
-                codeEl.textContent = 'Fetching compose definition from Fenrir Daemon...';
-                modal.classList.add('open');
-                
-                // Fetch dynamically via REST fallback
-                fetch('/admin/compose?name=' + encodeURIComponent(stackName) + '&key=' + encodeURIComponent('{{.AdminKey}}'))
-                    .then(r => {
-                        if (!r.ok) throw new Error('HTTP ' + r.status);
-                        return r.json();
-                    })
-                    .then(data => {
-                        codeEl.textContent = data.compose || '# No compose definition found.';
-                    })
-                    .catch(err => {
-                        codeEl.textContent = '# Failed to fetch compose definition: ' + err.message;
-                    });
+                const filename = (document.getElementById('auxFilename').value || 'config.yml').trim();
+                const restart = document.getElementById('yamlRestart').checked;
+                const url = '/api/v1/projects/' + encodeURIComponent(currentStackName) + '/yaml/' + encodeURIComponent(filename) + '?restart=' + restart;
+
+                fetch(url, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Admin-Key': '{{.AdminKey}}'
+                    },
+                    body: JSON.stringify({ content: yamlContent })
+                })
+                .then(async r => {
+                    const data = await r.json().catch(() => ({}));
+                    if (!r.ok) throw new Error(data.error || 'HTTP ' + r.status);
+                    return data;
+                })
+                .then(data => {
+                    if (statusPill) statusPill.textContent = 'Saved';
+                    showEditorAlert('success', '✓ Auxiliary configuration file ' + filename + ' saved successfully' + (restart ? ' and stack restarted.' : '.'));
+                })
+                .catch(err => {
+                    if (statusPill) statusPill.textContent = 'Error';
+                    showEditorAlert('error', 'Failed to save YAML: ' + err.message);
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = '💾 Save & Apply';
+                });
             }
         }
 
@@ -911,10 +1381,11 @@ var (
         }
 
         function copyComposeYAML() {
-            const codeEl = document.getElementById('modalComposeContent');
+            const editor = document.getElementById('modalComposeEditor');
             const copyBtn = document.getElementById('btnCopy');
-            if (codeEl) {
-                navigator.clipboard.writeText(codeEl.textContent).then(() => {
+            const textToCopy = editor ? editor.value : '';
+            if (textToCopy) {
+                navigator.clipboard.writeText(textToCopy).then(() => {
                     copyBtn.textContent = '✓ Copied!';
                     setTimeout(() => {
                         copyBtn.textContent = '📋 Copy YAML';
@@ -924,6 +1395,24 @@ var (
                 });
             }
         }
+
+        // Support Tab key in editor textarea for 2 spaces indentation
+        document.addEventListener('DOMContentLoaded', () => {
+            const editor = document.getElementById('modalComposeEditor');
+            if (editor) {
+                editor.addEventListener('keydown', function(e) {
+                    if (e.key === 'Tab') {
+                        e.preventDefault();
+                        const start = this.selectionStart;
+                        const end = this.selectionEnd;
+                        this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
+                        this.selectionStart = this.selectionEnd = start + 2;
+                        updateEditorMeta();
+                    }
+                });
+                editor.addEventListener('input', updateEditorMeta);
+            }
+        });
 
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {

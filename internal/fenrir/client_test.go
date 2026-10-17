@@ -3,8 +3,10 @@ package fenrir
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -57,6 +59,43 @@ func TestFenrirClient(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/minecraft-srv/compose":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"compose": "version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft-server:latest\n",
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/minecraft-srv/compose":
+			// Verify query parameters if present
+			dryRun := r.URL.Query().Get("dry_run")
+			redeploy := r.URL.Query().Get("redeploy")
+			contentType := r.Header.Get("Content-Type")
+
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if len(bodyBytes) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "empty body"})
+				return
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success":      true,
+				"content_type": contentType,
+				"dry_run":      dryRun,
+				"redeploy":     redeploy,
+			})
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/minecraft-srv/yaml/config.yml":
+			restart := r.URL.Query().Get("restart")
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if len(bodyBytes) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "empty body"})
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": true,
+				"restart": restart,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/minecraft-srv/yaml/config.yml":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"content": "server:\n  port: 25565\n",
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/metrics/host":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -121,16 +160,66 @@ func TestFenrirClient(t *testing.T) {
 		t.Errorf("expected non-empty compose content")
 	}
 
-	// 7. Reconstruct Compose fallback test
+	// 7. Update Project Compose with Raw YAML
+	rawYAMLContent := "version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft-server:latest\n"
+	falseVal := false
+	trueVal := true
+	err = client.UpdateProjectCompose(ctx, "minecraft-srv", rawYAMLContent, &ComposeUpdateOptions{
+		RawYAML:  true,
+		Redeploy: &falseVal,
+		DryRun:   &trueVal,
+	})
+	if err != nil {
+		t.Fatalf("unexpected raw compose update error: %v", err)
+	}
+
+	// 8. Update Project Compose with JSON payload (different field keys)
+	for _, field := range []string{"compose", "yaml", "content", "composeContent"} {
+		err = client.UpdateProjectCompose(ctx, "minecraft-srv", rawYAMLContent, &ComposeUpdateOptions{
+			JSONField: field,
+		})
+		if err != nil {
+			t.Fatalf("unexpected compose update error with JSON field %s: %v", field, err)
+		}
+	}
+
+	// 9. Update Project YAML with optional restart
+	configContent := "server:\n  port: 25565\n"
+	err = client.UpdateProjectYAML(ctx, "minecraft-srv", "config.yml", configContent, &YAMLUpdateOptions{
+		Restart: &trueVal,
+	})
+	if err != nil {
+		t.Fatalf("unexpected yaml update error: %v", err)
+	}
+
+	// 10. Update Project YAML with raw YAML
+	err = client.UpdateProjectYAML(ctx, "minecraft-srv", "config.yml", configContent, &YAMLUpdateOptions{
+		RawYAML: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected raw yaml update error: %v", err)
+	}
+
+	// 11. Get Project YAML
+	yamlContent, err := client.GetProjectYAML(ctx, "minecraft-srv", "config.yml")
+	if err != nil {
+		t.Fatalf("unexpected yaml fetch error: %v", err)
+	}
+	if !strings.Contains(yamlContent, "port: 25565") {
+		t.Errorf("unexpected yaml content: %s", yamlContent)
+	}
+
+	// 12. Reconstruct Compose fallback test
 	fallbackYAML := ReconstructCompose(&projects[0])
 	if fallbackYAML == "" {
 		t.Errorf("expected reconstructed compose YAML")
 	}
 
-	// 8. Test Unauthorized
+	// 13. Test Unauthorized
 	badClient := NewClient(server.URL, "wrong-key", 5*time.Second)
 	_, err = badClient.GetHealth(ctx)
 	if err != ErrUnauthorized {
 		t.Errorf("expected ErrUnauthorized, got %v", err)
 	}
 }
+

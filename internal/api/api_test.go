@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -403,4 +404,320 @@ func TestAdminStacksAndComposeViewer(t *testing.T) {
 		t.Errorf("expected compose in /api/v1/stacks/{name}/compose, got: %s", wAPICompose.Body.String())
 	}
 }
+
+func TestComposeAndYAMLEditingIntegration(t *testing.T) {
+	// 1. Mock Fenrir Daemon with compose and yaml update endpoints
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/minecraft-srv/compose":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if len(bodyBytes) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"empty compose body"}`))
+				return
+			}
+			dryRun := r.URL.Query().Get("dry_run")
+			redeploy := r.URL.Query().Get("redeploy")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"success":true,"dry_run":%s,"redeploy":%s}`,
+				strconvBool(dryRun == "true"),
+				strconvBool(redeploy != "false"))))
+
+		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/minecraft-srv/yaml/config.yml":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if len(bodyBytes) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":"empty yaml body"}`))
+				return
+			}
+			restart := r.URL.Query().Get("restart")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"success":true,"restart":%s}`, strconvBool(restart == "true"))))
+
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/minecraft-srv/yaml/config.yml":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"content":"server:\n  port: 25565\n"}`))
+
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/minecraft-srv/compose":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"compose":"version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft\n"}`))
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+	defer fenrirServer.Close()
+
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-key", 5*time.Second)
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_editing_api.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		AdminKey:     "secret-admin-key",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+
+	// 1. Raw YAML to PUT /api/v1/projects/{name}/compose
+	rawYAML := "version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft:latest\n"
+	reqRaw := httptest.NewRequest(http.MethodPut, "/api/v1/projects/minecraft-srv/compose?redeploy=false&dry_run=true", strings.NewReader(rawYAML))
+	reqRaw.Header.Set("Content-Type", "text/yaml")
+	reqRaw.Header.Set("X-Admin-Key", "secret-admin-key")
+	wRaw := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wRaw, reqRaw)
+
+	if wRaw.Code != http.StatusOK {
+		t.Fatalf("expected 200 on raw compose PUT, got %d: %s", wRaw.Code, wRaw.Body.String())
+	}
+	if !strings.Contains(wRaw.Body.String(), `"success":true`) {
+		t.Errorf("expected success in response: %s", wRaw.Body.String())
+	}
+
+	// 2. Test JSON body variations with /api/v1/stacks/{name}/compose
+	for _, key := range []string{"compose", "yaml", "content", "composeContent"} {
+		jsonPayload := fmt.Sprintf(`{"%s":"version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft\n"}`, key)
+		reqJSON := httptest.NewRequest(http.MethodPut, "/api/v1/stacks/minecraft-srv/compose", strings.NewReader(jsonPayload))
+		reqJSON.Header.Set("Content-Type", "application/json")
+		reqJSON.Header.Set("X-Admin-Key", "secret-admin-key")
+		wJSON := httptest.NewRecorder()
+		server.Handler().ServeHTTP(wJSON, reqJSON)
+
+		if wJSON.Code != http.StatusOK {
+			t.Fatalf("expected 200 on compose JSON key '%s', got %d: %s", key, wJSON.Code, wJSON.Body.String())
+		}
+	}
+
+	// 3. Test auxiliary YAML update: PUT /api/v1/projects/{name}/yaml/{filename}
+	rawConfig := "server:\n  port: 25565\n"
+	reqYAML := httptest.NewRequest(http.MethodPut, "/api/v1/projects/minecraft-srv/yaml/config.yml?restart=true", strings.NewReader(rawConfig))
+	reqYAML.Header.Set("Content-Type", "text/yaml")
+	reqYAML.Header.Set("X-Admin-Key", "secret-admin-key")
+	wYAML := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wYAML, reqYAML)
+
+	if wYAML.Code != http.StatusOK {
+		t.Fatalf("expected 200 on auxiliary yaml update, got %d: %s", wYAML.Code, wYAML.Body.String())
+	}
+	if !strings.Contains(wYAML.Body.String(), `"restart":true`) {
+		t.Errorf("expected restart:true in response: %s", wYAML.Body.String())
+	}
+
+	// 4. Test auxiliary YAML fetch: GET /api/v1/projects/{name}/yaml/{filename}
+	reqGetYAML := httptest.NewRequest(http.MethodGet, "/api/v1/projects/minecraft-srv/yaml/config.yml", nil)
+	reqGetYAML.Header.Set("X-Admin-Key", "secret-admin-key")
+	wGetYAML := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wGetYAML, reqGetYAML)
+
+	if wGetYAML.Code != http.StatusOK {
+		t.Fatalf("expected 200 on auxiliary yaml fetch, got %d: %s", wGetYAML.Code, wGetYAML.Body.String())
+	}
+	if !strings.Contains(wGetYAML.Body.String(), "port: 25565") {
+		t.Errorf("expected port in fetched yaml: %s", wGetYAML.Body.String())
+	}
+
+	// 5. Test Admin UI endpoint POST /admin/compose
+	uiForm := url.Values{}
+	uiForm.Set("name", "minecraft-srv")
+	uiForm.Set("compose", rawYAML)
+	uiForm.Set("key", "secret-admin-key")
+	reqUICompose := httptest.NewRequest(http.MethodPost, "/admin/compose", strings.NewReader(uiForm.Encode()))
+	reqUICompose.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	wUICompose := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wUICompose, reqUICompose)
+
+	if wUICompose.Code != http.StatusOK && wUICompose.Code != http.StatusSeeOther {
+		t.Fatalf("expected 200 or 303 from /admin/compose, got %d: %s", wUICompose.Code, wUICompose.Body.String())
+	}
+
+	// 6. Test Admin UI endpoint GET /admin/yaml
+	reqAdminGetYAML := httptest.NewRequest(http.MethodGet, "/admin/yaml?name=minecraft-srv&filename=config.yml&key=secret-admin-key", nil)
+	wAdminGetYAML := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminGetYAML, reqAdminGetYAML)
+
+	if wAdminGetYAML.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin/yaml, got %d: %s", wAdminGetYAML.Code, wAdminGetYAML.Body.String())
+	}
+	if !strings.Contains(wAdminGetYAML.Body.String(), "port: 25565") {
+		t.Errorf("expected yaml content in /admin/yaml response: %s", wAdminGetYAML.Body.String())
+	}
+}
+
+func strconvBool(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
+func TestComposeAndYAMLRBACStrictAdminOnly(t *testing.T) {
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer fenrirServer.Close()
+
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-key", 5*time.Second)
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_rbac_strict.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	// Seed users with different roles
+	adminUser, _ := db.UpsertUser(ctx, "discord_admin", "AdminBob", database.RoleAdmin)
+	opUser, _ := db.UpsertUser(ctx, "discord_op", "OperatorAlice", database.RoleOperator)
+	viewerUser, _ := db.UpsertUser(ctx, "discord_viewer", "ViewerCharlie", database.RoleViewer)
+	unlinkedUser, _ := db.UpsertUser(ctx, "discord_unlinked", "UnlinkedDavid", database.RoleUnlinked)
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		AdminKey:     "system-admin-secret",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+	validYAML := "version: '3.8'\nservices:\n  app:\n    image: nginx\n"
+
+	// 1. Operator calling PUT compose -> 403 Forbidden
+	reqOp := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqOp.Header.Set("Content-Type", "text/yaml")
+	reqOp.Header.Set("X-Discord-User-ID", opUser.DiscordID)
+	wOp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOp, reqOp)
+
+	if wOp.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Operator on compose update, got %d: %s", wOp.Code, wOp.Body.String())
+	}
+
+	// 2. Viewer calling PUT compose -> 403 Forbidden
+	reqViewer := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqViewer.Header.Set("Content-Type", "text/yaml")
+	reqViewer.Header.Set("X-Discord-User-ID", viewerUser.DiscordID)
+	wViewer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wViewer, reqViewer)
+
+	if wViewer.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Viewer on compose update, got %d: %s", wViewer.Code, wViewer.Body.String())
+	}
+
+	// 3. User with explicit RoleUnlinked -> 403 Forbidden
+	reqUnlinkedRole := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqUnlinkedRole.Header.Set("Content-Type", "text/yaml")
+	reqUnlinkedRole.Header.Set("X-Discord-User-ID", unlinkedUser.DiscordID)
+	wUnlinkedRole := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wUnlinkedRole, reqUnlinkedRole)
+
+	if wUnlinkedRole.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Unlinked role on compose update, got %d: %s", wUnlinkedRole.Code, wUnlinkedRole.Body.String())
+	}
+
+	// 4. Completely unlinked / unknown user ID -> 403 Forbidden
+	reqUnknown := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqUnknown.Header.Set("Content-Type", "text/yaml")
+	reqUnknown.Header.Set("X-Discord-User-ID", "unknown_user_999999")
+	wUnknown := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wUnknown, reqUnknown)
+
+	if wUnknown.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for unlinked user on compose update, got %d: %s", wUnknown.Code, wUnknown.Body.String())
+	}
+
+	// 5. Explicit X-Role: Operator or Viewer header -> 403 Forbidden
+	reqRoleOp := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqRoleOp.Header.Set("Content-Type", "text/yaml")
+	reqRoleOp.Header.Set("X-Role", "Operator")
+	wRoleOp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wRoleOp, reqRoleOp)
+
+	if wRoleOp.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for X-Role: Operator, got %d", wRoleOp.Code)
+	}
+
+	// 6. Anonymous request without credentials -> 403 Forbidden
+	reqAnon := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqAnon.Header.Set("Content-Type", "text/yaml")
+	wAnon := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAnon, reqAnon)
+
+	if wAnon.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for anonymous request, got %d", wAnon.Code)
+	}
+
+	// 7. Auxiliary YAML editing routes strictly forbidden for non-admins
+	for _, u := range []*database.User{opUser, viewerUser, unlinkedUser} {
+		reqYAMLForbidden := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/yaml/config.yml", strings.NewReader("config: true"))
+		reqYAMLForbidden.Header.Set("Content-Type", "text/yaml")
+		reqYAMLForbidden.Header.Set("X-Discord-User-ID", u.DiscordID)
+		wYF := httptest.NewRecorder()
+		server.Handler().ServeHTTP(wYF, reqYAMLForbidden)
+
+		if wYF.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden on YAML route for user %s (role %s), got %d", u.Username, u.Role, wYF.Code)
+		}
+	}
+
+	// 8. Admin Discord User -> 200 OK
+	reqAdmin := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqAdmin.Header.Set("Content-Type", "text/yaml")
+	reqAdmin.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdmin := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdmin, reqAdmin)
+
+	if wAdmin.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for Admin user, got %d: %s", wAdmin.Code, wAdmin.Body.String())
+	}
+
+	// 9. Admin via X-Admin-Key -> 200 OK
+	reqAdminKey := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
+	reqAdminKey.Header.Set("Content-Type", "text/yaml")
+	reqAdminKey.Header.Set("X-Admin-Key", "system-admin-secret")
+	wAdminKey := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminKey, reqAdminKey)
+
+	if wAdminKey.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for AdminKey auth, got %d: %s", wAdminKey.Code, wAdminKey.Body.String())
+	}
+
+	// 10. Verify Audit Log was recorded
+	logs, err := db.ListAuditLogs(ctx, 20)
+	if err != nil {
+		t.Fatalf("failed to query audit logs: %v", err)
+	}
+	hasUnauthorized := false
+	hasSuccess := false
+	for _, l := range logs {
+		if l.Status == "UNAUTHORIZED" {
+			hasUnauthorized = true
+		}
+		if l.Status == "SUCCESS" {
+			hasSuccess = true
+		}
+	}
+	if !hasUnauthorized {
+		t.Errorf("expected UNAUTHORIZED entry in audit logs")
+	}
+	if !hasSuccess {
+		t.Errorf("expected SUCCESS entry in audit logs")
+	}
+}
+
 

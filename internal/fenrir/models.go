@@ -44,6 +44,21 @@ type CreateProjectRequest struct {
 	Compose string `json:"compose"`
 }
 
+// ComposeUpdateOptions contains optional query parameters and formatting options for updating project compose.
+type ComposeUpdateOptions struct {
+	Redeploy  *bool  `json:"redeploy,omitempty"`
+	DryRun    *bool  `json:"dry_run,omitempty"`
+	RawYAML   bool   `json:"raw_yaml,omitempty"`
+	JSONField string `json:"json_field,omitempty"` // "compose", "yaml", "content", or "composeContent"
+}
+
+// YAMLUpdateOptions contains optional query parameters and formatting options for updating auxiliary YAML files.
+type YAMLUpdateOptions struct {
+	Restart   *bool  `json:"restart,omitempty"`
+	RawYAML   bool   `json:"raw_yaml,omitempty"`
+	JSONField string `json:"json_field,omitempty"` // "content", "yaml", "compose", or "composeContent"
+}
+
 // APIResponse wraps standardized JSON envelopes returned by Fenrir Daemon.
 type APIResponse struct {
 	Success bool   `json:"success,omitempty"`
@@ -51,3 +66,4 @@ type APIResponse struct {
 	Message string `json:"message,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
+

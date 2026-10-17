@@ -130,12 +130,12 @@ func (c *Client) doRequest(ctx context.Context, method, path string, contentType
 	return nil
 }
 
-// GetHealth fetches daemon health status.
+// GetHealth fetches daemon health status from GET /api/v1/health (with /health fallback).
 func (c *Client) GetHealth(ctx context.Context) (*HealthStatus, error) {
 	var status HealthStatus
-	if err := c.do(ctx, http.MethodGet, "/health", nil, &status); err != nil {
-		// Try fallback to /api/v1/health if /health returned error
-		if errFallback := c.do(ctx, http.MethodGet, "/api/v1/health", nil, &status); errFallback == nil {
+	if err := c.do(ctx, http.MethodGet, "/api/v1/health", nil, &status); err != nil {
+		// Try fallback to /health if /api/v1/health returned error
+		if errFallback := c.do(ctx, http.MethodGet, "/health", nil, &status); errFallback == nil {
 			return &status, nil
 		}
 		return nil, err
@@ -194,13 +194,22 @@ func (c *Client) DeployProject(ctx context.Context, name, composeYAML string) er
 	return c.do(ctx, http.MethodPost, "/api/v1/projects", req, nil)
 }
 
-// GetHostMetrics queries CPU, RAM, and Disk metrics from Fenrir.
-func (c *Client) GetHostMetrics(ctx context.Context) (*HostMetrics, error) {
+// GetHost queries host telemetry and hardware metrics from Fenrir via GET /api/v1/host (with /api/v1/metrics/host fallback).
+func (c *Client) GetHost(ctx context.Context) (*HostMetrics, error) {
 	var metrics HostMetrics
-	if err := c.do(ctx, http.MethodGet, "/api/v1/metrics/host", nil, &metrics); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/api/v1/host", nil, &metrics); err != nil {
+		// Fallback to /api/v1/metrics/host
+		if errFallback := c.do(ctx, http.MethodGet, "/api/v1/metrics/host", nil, &metrics); errFallback == nil {
+			return &metrics, nil
+		}
 		return nil, err
 	}
 	return &metrics, nil
+}
+
+// GetHostMetrics queries CPU, RAM, and Disk metrics from Fenrir (alias for GetHost).
+func (c *Client) GetHostMetrics(ctx context.Context) (*HostMetrics, error) {
+	return c.GetHost(ctx)
 }
 
 // GetProjectCompose retrieves the raw compose definition for a project.

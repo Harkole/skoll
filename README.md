@@ -122,19 +122,23 @@ flowchart TD
 Generates an ephemeral, single-use linking link with a 15-minute expiration time. Clicking the link authenticates the user's Discord ID via Discord OAuth2 and records the user in the database.
 
 ### `/status` *(Viewer+)*
-Queries Fenrir Daemon for real-time status and returns a formatted embed with:
-- Fenrir health and daemon version.
-- Host CPU and Memory utilization percentages.
-- Registered Docker Compose stacks and their active status (`🟢 running`, `🔴 stopped`).
+Queries Fenrir Daemon host telemetry and health endpoints (`GET /api/v1/health` and `GET /api/v1/host`) and returns a rich embed focusing exclusively on host metrics:
+- Fenrir daemon health status, version, and daemon/host uptime.
+- Host hardware telemetry: CPU utilization, RAM usage (percentage and GB allocation), system load averages (1m, 5m, 15m), and disk usage.
+
+### `/stack list` *(Viewer+)*
+Dedicated Docker Compose inventory command querying Fenrir's projects API (`GET /api/v1/projects`). Returns a formatted embed detailing:
+- All registered Docker Compose stacks with status indicators (`🟢 running`, `🟡 degraded/restarting`, `🔴 stopped`).
+- Running vs total service container counts for each stack (e.g. `(2/2 services running)`).
+
+### `/stack deploy <name> <compose>` *(Admin)*
+Deploys a new Docker Compose stack or updates an existing stack using the provided Compose YAML definition.
 
 ### `/server restart <name>` *(Operator+)*
 Instructs Fenrir Daemon to restart all containers in the specified Docker Compose stack. Records an entry in `audit_logs` detailing the actor, target stack, and result.
 
 ### `/server start <name>` / `/server stop <name>` *(Operator+)*
 Starts or stops a specific container stack.
-
-### `/stack deploy <name> <compose>` *(Admin)*
-Deploys a new Docker Compose stack or updates an existing stack using the provided Compose YAML definition.
 
 ---
 

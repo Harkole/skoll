@@ -183,22 +183,23 @@ func (b *Bot) HandleStatusCommand(s *discordgo.Session, i *discordgo.Interaction
 		return
 	}
 
-	// Query Fenrir Health & Metrics
+	// Query Fenrir Health (GET /api/v1/health) & Host Telemetry (GET /api/v1/host)
 	health, err := b.fenrirClient.GetHealth(ctx)
 	statusText := "Online"
 	color := 0x22c55e // Green
 	if err != nil {
 		statusText = "Offline (" + err.Error() + ")"
 		color = 0xef4444 // Red
+	} else if health != nil && health.Status != "" {
+		statusText = titleCase(health.Status)
 	}
 
-	metrics, _ := b.fenrirClient.GetHostMetrics(ctx)
-	projects, _ := b.fenrirClient.ListProjects(ctx)
+	host, _ := b.fenrirClient.GetHost(ctx)
 
-	// Format embed
+	// Format embed focusing exclusively on daemon health, version, uptime, and host hardware metrics
 	embed := &discordgo.MessageEmbed{
 		Title:       "🐺 Fenrir Daemon Status",
-		Description: fmt.Sprintf("**Fenrir Status:** `%s`", statusText),
+		Description: fmt.Sprintf("**Daemon Health:** `%s`", statusText),
 		Color:       color,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		Fields:      []*discordgo.MessageEmbedField{},
@@ -212,43 +213,94 @@ func (b *Bot) HandleStatusCommand(s *discordgo.Session, i *discordgo.Interaction
 		})
 	}
 
-	if metrics != nil {
-		embed.Fields = append(embed.Fields,
-			&discordgo.MessageEmbedField{
-				Name:   "CPU Utilization",
-				Value:  fmt.Sprintf("%.1f%%", metrics.CPUPercent),
-				Inline: true,
-			},
-			&discordgo.MessageEmbedField{
-				Name:   "RAM Utilization",
-				Value:  fmt.Sprintf("%.1f%%", metrics.MemoryPercent),
-				Inline: true,
-			},
-		)
+	// Uptime calculation from host telemetry or health
+	uptimeStr := ""
+	if host != nil && host.UptimeFormatted != "" {
+		uptimeStr = host.UptimeFormatted
+	} else if host != nil && host.UptimeSeconds > 0 {
+		uptimeStr = formatUptime(host.UptimeSeconds)
+	} else if health != nil && health.Uptime != "" {
+		uptimeStr = health.Uptime
+	} else if health != nil && health.UptimeSeconds > 0 {
+		uptimeStr = formatUptime(health.UptimeSeconds)
 	}
 
-	if len(projects) > 0 {
-		var stackSummaries []string
-		for _, p := range projects {
-			stateEmoji := "🟢"
-			if p.Status != "running" {
-				stateEmoji = "🔴"
-			}
-			stackSummaries = append(stackSummaries, fmt.Sprintf("%s **%s** (`%s`)", stateEmoji, p.Name, p.Status))
+	if uptimeStr != "" {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   "Uptime",
+			Value:  uptimeStr,
+			Inline: true,
+		})
+	}
+
+	if host != nil {
+		// CPU Usage
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   "CPU Usage",
+			Value:  fmt.Sprintf("%.1f%%", host.CPUPercent),
+			Inline: true,
+		})
+
+		// RAM Usage
+		ramVal := fmt.Sprintf("%.1f%%", host.MemoryPercent)
+		if host.MemoryUsedBytes > 0 && host.MemoryTotal > 0 {
+			usedGB := float64(host.MemoryUsedBytes) / (1024 * 1024 * 1024)
+			totalGB := float64(host.MemoryTotal) / (1024 * 1024 * 1024)
+			ramVal = fmt.Sprintf("%.1f%% (%.2f / %.2f GB)", host.MemoryPercent, usedGB, totalGB)
 		}
 		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:  fmt.Sprintf("Active Stacks (%d)", len(projects)),
-			Value: strings.Join(stackSummaries, "\n"),
+			Name:   "RAM Usage",
+			Value:  ramVal,
+			Inline: true,
 		})
-	} else {
-		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-			Name:  "Stacks",
-			Value: "*No Docker Compose stacks currently registered.*",
-		})
+
+		// Load Averages
+		loadStr := ""
+		if len(host.LoadAverage) >= 3 {
+			loadStr = fmt.Sprintf("%.2f, %.2f, %.2f", host.LoadAverage[0], host.LoadAverage[1], host.LoadAverage[2])
+		} else if host.Load1 > 0 || host.Load5 > 0 || host.Load15 > 0 {
+			loadStr = fmt.Sprintf("%.2f, %.2f, %.2f", host.Load1, host.Load5, host.Load15)
+		}
+		if loadStr != "" {
+			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+				Name:   "Load Averages (1m, 5m, 15m)",
+				Value:  loadStr,
+				Inline: true,
+			})
+		}
+
+		// Disk Usage
+		if host.DiskPercent > 0 {
+			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+				Name:   "Disk Usage",
+				Value:  fmt.Sprintf("%.1f%%", host.DiskPercent),
+				Inline: true,
+			})
+		}
 	}
 
-	_ = b.db.RecordAuditLog(ctx, dbUser.DiscordID, dbUser.Username, "status_query", "all", "SUCCESS")
+	_ = b.db.RecordAuditLog(ctx, dbUser.DiscordID, dbUser.Username, "status_query", "host", "SUCCESS")
 	_ = ReplyEmbed(s, i, embed)
+}
+
+func formatUptime(seconds uint64) string {
+	if seconds == 0 {
+		return "0s"
+	}
+	days := seconds / 86400
+	hours := (seconds % 86400) / 3600
+	minutes := (seconds % 3600) / 60
+	secs := seconds % 60
+	if days > 0 {
+		return fmt.Sprintf("%dd %dh %dm", days, hours, minutes)
+	}
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm %ds", hours, minutes, secs)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, secs)
+	}
+	return fmt.Sprintf("%ds", secs)
 }
 
 // HandleServerCommand handles server lifecycle (/server restart, start, stop). Requires Operator+.
@@ -436,18 +488,38 @@ func (b *Bot) HandleStackCommand(s *discordgo.Session, i *discordgo.InteractionC
 
 		var desc strings.Builder
 		if len(projects) == 0 {
-			desc.WriteString("No projects found.")
+			desc.WriteString("*No Docker Compose stacks currently registered.*")
 		} else {
 			for _, p := range projects {
-				desc.WriteString(fmt.Sprintf("• **%s** — `%s` (%d services)\n", p.Name, p.Status, len(p.Services)))
+				stateEmoji := "🟢"
+				statusLower := strings.ToLower(p.Status)
+				if statusLower != "running" && statusLower != "up" {
+					if statusLower == "degraded" || statusLower == "restarting" {
+						stateEmoji = "🟡"
+					} else {
+						stateEmoji = "🔴"
+					}
+				}
+				runningServices := 0
+				for _, svc := range p.Services {
+					if strings.ToLower(svc.State) == "running" {
+						runningServices++
+					}
+				}
+				if len(p.Services) > 0 {
+					desc.WriteString(fmt.Sprintf("%s **%s** — `%s` (%d/%d services running)\n", stateEmoji, p.Name, p.Status, runningServices, len(p.Services)))
+				} else {
+					desc.WriteString(fmt.Sprintf("%s **%s** — `%s` (0 services)\n", stateEmoji, p.Name, p.Status))
+				}
 			}
 		}
 
 		_ = b.db.RecordAuditLog(ctx, dbUser.DiscordID, dbUser.Username, "stack_list", "all", "SUCCESS")
 		embed := &discordgo.MessageEmbed{
-			Title:       "📋 Registered Stacks",
+			Title:       fmt.Sprintf("📋 Registered Docker Compose Stacks (%d)", len(projects)),
 			Description: desc.String(),
 			Color:       0x38bdf8,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		}
 		_ = ReplyEmbed(s, i, embed)
 	}

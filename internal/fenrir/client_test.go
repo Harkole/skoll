@@ -223,3 +223,69 @@ func TestFenrirClient(t *testing.T) {
 	}
 }
 
+func TestFenrirHostAndHealthV1Endpoints(t *testing.T) {
+	expectedKey := "test-fenrir-secret"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Bearer "+expectedKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":         "healthy",
+				"version":        "2.4.0",
+				"uptime":         "3d 12h 45m",
+				"uptime_seconds": 305100,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/host":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"cpu_percent":       24.5,
+				"memory_percent":    68.2,
+				"memory_used_bytes": 10737418240, // 10 GB
+				"memory_total":      17179869184, // 16 GB
+				"disk_percent":      45.0,
+				"load_average":      []float64{1.25, 1.10, 0.95},
+				"uptime_seconds":    305100,
+				"hostname":          "fenrir-node-01",
+				"os":                "linux",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, expectedKey, 5*time.Second)
+	ctx := context.Background()
+
+	// 1. Test GetHealth via /api/v1/health
+	health, err := client.GetHealth(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error from GetHealth: %v", err)
+	}
+	if health.Status != "healthy" || health.Version != "2.4.0" || health.UptimeSeconds != 305100 {
+		t.Errorf("unexpected health response: %+v", health)
+	}
+
+	// 2. Test GetHost via /api/v1/host
+	host, err := client.GetHost(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error from GetHost: %v", err)
+	}
+	if host.CPUPercent != 24.5 || host.MemoryPercent != 68.2 {
+		t.Errorf("unexpected cpu or memory: %+v", host)
+	}
+	if len(host.LoadAverage) != 3 || host.LoadAverage[0] != 1.25 {
+		t.Errorf("unexpected load average: %+v", host.LoadAverage)
+	}
+	if host.Hostname != "fenrir-node-01" || host.OS != "linux" {
+		t.Errorf("unexpected host metadata: %+v", host)
+	}
+}
+

@@ -10,7 +10,7 @@ var Commands = []*discordgo.ApplicationCommand{
 	},
 	{
 		Name:        "status",
-		Description: "View Fenrir Daemon host metrics and active container stacks",
+		Description: "View Fenrir Daemon host telemetry, uptime, and system health",
 	},
 	{
 		Name:        "server",

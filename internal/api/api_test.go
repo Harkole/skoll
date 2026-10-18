@@ -464,9 +464,9 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 			dryRun := r.URL.Query().Get("dry_run")
 			redeploy := r.URL.Query().Get("redeploy")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"success":true,"dry_run":%s,"redeploy":%s}`,
+			_, _ = w.Write(fmt.Appendf(nil, `{"success":true,"dry_run":%s,"redeploy":%s}`,
 				strconvBool(dryRun == "true"),
-				strconvBool(redeploy != "false"))))
+				strconvBool(redeploy != "false")))
 
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/minecraft-srv/yaml/config.yml":
 			bodyBytes, _ := io.ReadAll(r.Body)
@@ -477,7 +477,7 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 			}
 			restart := r.URL.Query().Get("restart")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"success":true,"restart":%s}`, strconvBool(restart == "true"))))
+			_, _ = w.Write(fmt.Appendf(nil, `{"success":true,"restart":%s}`, strconvBool(restart == "true")))
 
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/minecraft-srv/yaml/config.yml":
 			w.WriteHeader(http.StatusOK)

@@ -413,9 +413,10 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	adminCount := 0
 	operatorCount := 0
 	for _, u := range users {
-		if u.Role == database.RoleAdmin {
+		switch u.Role {
+		case database.RoleAdmin:
 			adminCount++
-		} else if u.Role == database.RoleOperator {
+		case database.RoleOperator:
 			operatorCount++
 		}
 	}

@@ -1586,8 +1586,6 @@ var (
 </body>
 </html>`))
 
-	adminLoginTemplate = loginTemplate
-
 	forbiddenTemplate = template.Must(template.New("forbidden").Parse(`<!DOCTYPE html>
 <html lang="en">
 <head>

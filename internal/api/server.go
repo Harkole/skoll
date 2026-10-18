@@ -107,6 +107,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /admin/yaml", s.handleAdminUpdateYAML)
 	s.mux.HandleFunc("POST /admin/role", s.handleAdminRoleUpdate)
 	s.mux.HandleFunc("POST /admin/stacks/action", s.handleAdminStackAction)
+	s.mux.HandleFunc("GET /admin/archives", s.handleAdminArchivesRedirect)
+	s.mux.HandleFunc("POST /admin/archives/action", s.handleAdminArchiveAction)
 
 	// Admin REST API & Stack Operations
 	s.mux.HandleFunc("GET /api/v1/users", s.handleAPIListUsers)
@@ -130,6 +132,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/projects/{name}/stop", s.handleAPIStackStop)
 	s.mux.HandleFunc("DELETE /api/v1/stacks/{name}", s.handleAPIDeleteStack)
 	s.mux.HandleFunc("DELETE /api/v1/projects/{name}", s.handleAPIDeleteStack)
+
+	// Archived Stacks Management (90-day retention cooldown)
+	s.mux.HandleFunc("GET /api/v1/archives", s.handleAPIListArchives)
+	s.mux.HandleFunc("POST /api/v1/archives/{id}/restore", s.handleAPIRestoreArchive)
+	s.mux.HandleFunc("DELETE /api/v1/archives/{id}", s.handleAPIDeleteArchive)
 
 	// Container Lifecycle Controls (Operator+)
 	s.mux.HandleFunc("POST /api/v1/containers/{name}/start", func(w http.ResponseWriter, r *http.Request) { s.handleAPIContainerAction(w, r, "start") })
@@ -433,9 +440,10 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Check Fenrir status and fetch stacks
+	// Check Fenrir status and fetch stacks & archives
 	fenrirStatus := "Online"
 	var projects []fenrir.Project
+	var archives []fenrir.Archive
 	runningStacksCount := 0
 	if s.fenrirClient != nil {
 		if _, err := s.fenrirClient.GetHealth(ctx); err != nil {
@@ -457,6 +465,9 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			if archs, err := s.fenrirClient.ListArchives(ctx); err == nil {
+				archives = archs
+			}
 		}
 	} else {
 		fenrirStatus = "Not Configured"
@@ -472,6 +483,8 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"Users":              users,
 		"AuditLogs":          logs,
 		"Projects":           projects,
+		"Archives":           archives,
+		"TotalArchives":      len(archives),
 		"TotalUsers":         len(users),
 		"AdminCount":         adminCount,
 		"OperatorCount":      operatorCount,
@@ -1462,5 +1475,187 @@ func (s *Server) handleAPIContainerAction(w http.ResponseWriter, r *http.Request
 		"container": name,
 		"action":    action,
 		"message":   fmt.Sprintf("Container %s %sed successfully", name, action),
+	})
+}
+
+// handleAdminArchivesRedirect redirects /admin/archives to /admin?tab=archives.
+func (s *Server) handleAdminArchivesRedirect(w http.ResponseWriter, r *http.Request) {
+	if user, err := s.getSessionUser(r); err != nil || user == nil {
+		if !s.verifyAdminAuth(r) {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+	}
+	target := "/admin?tab=archives"
+	if key := r.URL.Query().Get("key"); key != "" {
+		target += "&key=" + url.QueryEscape(key)
+	}
+	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+}
+
+// handleAPIListArchives lists all archived stacks from Fenrir Daemon.
+func (s *Server) handleAPIListArchives(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.checkOperatorRBAC(w, r, "list_archives", "archives"); !ok {
+		return
+	}
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+	archives, err := s.fenrirClient.ListArchives(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(archives)
+}
+
+// handleAPIRestoreArchive handles POST /api/v1/archives/{id}/restore.
+func (s *Server) handleAPIRestoreArchive(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		http.Error(w, `{"error":"missing archive id"}`, http.StatusBadRequest)
+		return
+	}
+
+	user, ok := s.checkAdminRBAC(w, r, "archive_restore", id)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	if err := s.fenrirClient.RestoreArchive(ctx, id); err != nil {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "archive_restore", id, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "archive_restore", id, "SUCCESS")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"id":      id,
+		"message": fmt.Sprintf("Archive %s restored back into stack directory successfully", id),
+	})
+}
+
+// handleAPIDeleteArchive handles DELETE /api/v1/archives/{id}.
+func (s *Server) handleAPIDeleteArchive(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		http.Error(w, `{"error":"missing archive id"}`, http.StatusBadRequest)
+		return
+	}
+
+	user, ok := s.checkAdminRBAC(w, r, "archive_purge", id)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	if err := s.fenrirClient.DeleteArchive(ctx, id); err != nil {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "archive_purge", id, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "archive_purge", id, "SUCCESS")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"id":      id,
+		"message": fmt.Sprintf("Archive %s permanently purged from disk and database", id),
+	})
+}
+
+// handleAdminArchiveAction handles form and AJAX actions from the web UI for archives.
+func (s *Server) handleAdminArchiveAction(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.FormValue("id"))
+	action := strings.TrimSpace(r.FormValue("action"))
+	if id == "" {
+		id = strings.TrimSpace(r.PathValue("id"))
+	}
+	if id == "" {
+		http.Error(w, `{"error":"missing archive id"}`, http.StatusBadRequest)
+		return
+	}
+
+	auditAction := "archive_" + action
+	if action == "delete" || action == "purge" {
+		auditAction = "archive_purge"
+	} else if action == "restore" {
+		auditAction = "archive_restore"
+	}
+
+	user, ok := s.checkAdminRBAC(w, r, auditAction, id)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	var err error
+	var msg string
+
+	switch action {
+	case "restore":
+		err = s.fenrirClient.RestoreArchive(ctx, id)
+		msg = fmt.Sprintf("Archive %s restored back into stack directory successfully", id)
+	case "purge", "delete":
+		err = s.fenrirClient.DeleteArchive(ctx, id)
+		msg = fmt.Sprintf("Archive %s permanently purged from disk and database", id)
+	default:
+		http.Error(w, `{"error":"invalid archive action"}`, http.StatusBadRequest)
+		return
+	}
+
+	isJSON := strings.Contains(r.Header.Get("Accept"), "application/json") || strings.Contains(r.Header.Get("X-Requested-With"), "XMLHttpRequest")
+
+	if err != nil {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, auditAction, id, "FAILED")
+		if !isJSON {
+			http.Redirect(w, r, fmt.Sprintf("/admin?tab=archives&notification=Error: %s", url.QueryEscape(err.Error())), http.StatusSeeOther)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, auditAction, id, "SUCCESS")
+
+	if !isJSON {
+		http.Redirect(w, r, fmt.Sprintf("/admin?tab=archives&notification=%s", url.QueryEscape(msg)), http.StatusSeeOther)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"id":      id,
+		"action":  action,
+		"message": msg,
 	})
 }

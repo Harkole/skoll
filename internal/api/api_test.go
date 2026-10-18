@@ -1541,3 +1541,330 @@ func TestDestructiveAndControlEndpointsStrictAdminRBAC(t *testing.T) {
 		t.Errorf("missing audit log for UNAUTHORIZED container control by viewer")
 	}
 }
+
+func TestAdminDashboardArchives(t *testing.T) {
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && (r.URL.Path == "/health" || r.URL.Path == "/api/v1/health"):
+			_, _ = w.Write([]byte(`{"status":"healthy","version":"1.0.0"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/archives":
+			_, _ = w.Write([]byte(`{
+				"data": [
+					{
+						"id": 101,
+						"projectName": "production-app",
+						"fileSize": 10485760,
+						"createdAt": "2026-10-01T12:00:00Z",
+						"expiresAt": "2026-12-30T12:00:00Z",
+						"daysUntilDeletion": 73
+					}
+				]
+			}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+	defer fenrirServer.Close()
+
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-key", 5*time.Second)
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_admin_archives.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		AdminKey:     "admin-secret",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+
+	// 1. Verify /admin/archives redirects to /admin?tab=archives
+	reqRedir := httptest.NewRequest(http.MethodGet, "/admin/archives?key=admin-secret", nil)
+	wRedir := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wRedir, reqRedir)
+	if wRedir.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected 307 redirect from /admin/archives, got %d", wRedir.Code)
+	}
+	if loc := wRedir.Header().Get("Location"); !strings.Contains(loc, "tab=archives") {
+		t.Errorf("expected location to contain tab=archives, got %s", loc)
+	}
+
+	// 2. Fetch /admin dashboard with tab=archives
+	req := httptest.NewRequest(http.MethodGet, "/admin?key=admin-secret&tab=archives", nil)
+	w := httptest.NewRecorder()
+	server.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from /admin, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+
+	// Check Tab Button
+	if !strings.Contains(body, `id="tab-btn-archives"`) {
+		t.Errorf("missing tab-btn-archives in admin UI")
+	}
+	if !strings.Contains(body, "Archived Stacks (1)") {
+		t.Errorf("missing archive count in tab button")
+	}
+
+	// Check Tab Panel
+	if !strings.Contains(body, `id="tab-panel-archives"`) {
+		t.Errorf("missing tab-panel-archives in admin UI")
+	}
+
+	// Check Archive Metadata Rendering
+	if !strings.Contains(body, "production-app") {
+		t.Errorf("missing archive project name in UI")
+	}
+	if !strings.Contains(body, "10.00 MB") {
+		t.Errorf("missing formatted file size in UI")
+	}
+	if !strings.Contains(body, "73 days remaining") {
+		t.Errorf("missing days remaining badge in UI")
+	}
+
+	// Check Actions: Restore button and Purge Now button
+	if !strings.Contains(body, "action=\"/admin/archives/action\"") {
+		t.Errorf("missing form action for archives")
+	}
+	if !strings.Contains(body, "openPurgeModal('101', 'production-app')") {
+		t.Errorf("missing openPurgeModal trigger on Purge Now button")
+	}
+
+	// Check Purge Confirmation Modal
+	if !strings.Contains(body, `id="purgeModal"`) {
+		t.Errorf("missing purge confirmation modal in UI")
+	}
+	if !strings.Contains(body, "Confirm Permanent Archive Purge") {
+		t.Errorf("missing confirmation modal title in UI")
+	}
+	if !strings.Contains(body, "PERMANENT &amp; IRREVERSIBLE ACTION") {
+		t.Errorf("missing permanent warning in confirmation modal")
+	}
+}
+
+func TestAPIArchivesEndpoints(t *testing.T) {
+	var restoreCalledWith string
+	var deleteCalledWith string
+
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/archives":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{
+						"id":                55,
+						"projectName":       "analytics-stack",
+						"fileSize":          1024,
+						"createdAt":         time.Now().Add(-10 * 24 * time.Hour).Format(time.RFC3339),
+						"expiresAt":         time.Now().Add(80 * 24 * time.Hour).Format(time.RFC3339),
+						"daysUntilDeletion": 80,
+					},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/archives/55/restore":
+			restoreCalledWith = "55"
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/archives/55":
+			deleteCalledWith = "55"
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+		}
+	}))
+	defer fenrirServer.Close()
+
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-key", 5*time.Second)
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_api_archives.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	adminUser, _ := db.UpsertUser(ctx, "discord_admin", "AdminUser", database.RoleAdmin)
+	operatorUser, _ := db.UpsertUser(ctx, "discord_operator", "OperatorUser", database.RoleOperator)
+	viewerUser, _ := db.UpsertUser(ctx, "discord_viewer", "ViewerUser", database.RoleViewer)
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		AdminKey:     "admin-secret",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+
+	// 1. GET /api/v1/archives RBAC
+	// Unlinked / unauthorized:
+	reqUnauth := httptest.NewRequest(http.MethodGet, "/api/v1/archives", nil)
+	wUnauth := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wUnauth, reqUnauth)
+	if wUnauth.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for unlinked caller on GET /api/v1/archives, got %d", wUnauth.Code)
+	}
+
+	// Viewer (forbidden - Operator required)
+	reqViewer := httptest.NewRequest(http.MethodGet, "/api/v1/archives", nil)
+	reqViewer.Header.Set("X-Discord-User-ID", viewerUser.DiscordID)
+	wViewer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wViewer, reqViewer)
+	if wViewer.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for Viewer on GET /api/v1/archives, got %d", wViewer.Code)
+	}
+
+	// Operator (allowed)
+	reqOp := httptest.NewRequest(http.MethodGet, "/api/v1/archives", nil)
+	reqOp.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOp := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOp, reqOp)
+	if wOp.Code != http.StatusOK {
+		t.Errorf("expected 200 for Operator on GET /api/v1/archives, got %d", wOp.Code)
+	}
+	var archives []fenrir.Archive
+	if err := json.Unmarshal(wOp.Body.Bytes(), &archives); err != nil {
+		t.Fatalf("failed to decode archives response: %v", err)
+	}
+	if len(archives) != 1 || archives[0].ProjectName != "analytics-stack" {
+		t.Errorf("unexpected archives list: %+v", archives)
+	}
+
+	// 2. POST /api/v1/archives/{id}/restore RBAC
+	// Operator cannot restore (Admin required)
+	reqOpRestore := httptest.NewRequest(http.MethodPost, "/api/v1/archives/55/restore", nil)
+	reqOpRestore.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOpRestore := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpRestore, reqOpRestore)
+	if wOpRestore.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for Operator on restore, got %d", wOpRestore.Code)
+	}
+
+	// Admin can restore
+	reqAdminRestore := httptest.NewRequest(http.MethodPost, "/api/v1/archives/55/restore", nil)
+	reqAdminRestore.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdminRestore := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminRestore, reqAdminRestore)
+	if wAdminRestore.Code != http.StatusOK {
+		t.Errorf("expected 200 for Admin on restore, got %d", wAdminRestore.Code)
+	}
+	if restoreCalledWith != "55" {
+		t.Errorf("expected restore called for '55', got '%s'", restoreCalledWith)
+	}
+
+	// 3. DELETE /api/v1/archives/{id} RBAC
+	// Operator cannot delete (Admin required)
+	reqOpDelete := httptest.NewRequest(http.MethodDelete, "/api/v1/archives/55", nil)
+	reqOpDelete.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOpDelete := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpDelete, reqOpDelete)
+	if wOpDelete.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for Operator on delete, got %d", wOpDelete.Code)
+	}
+
+	// Admin can delete / purge
+	reqAdminDelete := httptest.NewRequest(http.MethodDelete, "/api/v1/archives/55", nil)
+	reqAdminDelete.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdminDelete := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminDelete, reqAdminDelete)
+	if wAdminDelete.Code != http.StatusOK {
+		t.Errorf("expected 200 for Admin on delete, got %d", wAdminDelete.Code)
+	}
+	if deleteCalledWith != "55" {
+		t.Errorf("expected delete called for '55', got '%s'", deleteCalledWith)
+	}
+
+	// 4. POST /admin/archives/action form submissions
+	// Test Web Form Restore Action
+	formRestore := url.Values{}
+	formRestore.Set("id", "55")
+	formRestore.Set("action", "restore")
+	reqFormRestore := httptest.NewRequest(http.MethodPost, "/admin/archives/action", strings.NewReader(formRestore.Encode()))
+	reqFormRestore.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqFormRestore.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wFormRestore := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wFormRestore, reqFormRestore)
+	if wFormRestore.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 redirect on form restore, got %d", wFormRestore.Code)
+	}
+	if loc := wFormRestore.Header().Get("Location"); !strings.Contains(loc, "tab=archives") || !strings.Contains(loc, "notification") {
+		t.Errorf("unexpected redirect location on form restore: %s", loc)
+	}
+
+	// Test Web Form Purge Action
+	formPurge := url.Values{}
+	formPurge.Set("id", "55")
+	formPurge.Set("action", "purge")
+	reqFormPurge := httptest.NewRequest(http.MethodPost, "/admin/archives/action", strings.NewReader(formPurge.Encode()))
+	reqFormPurge.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqFormPurge.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wFormPurge := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wFormPurge, reqFormPurge)
+	if wFormPurge.Code != http.StatusSeeOther {
+		t.Errorf("expected 303 redirect on form purge, got %d", wFormPurge.Code)
+	}
+	if loc := wFormPurge.Header().Get("Location"); !strings.Contains(loc, "tab=archives") || !strings.Contains(loc, "purged") {
+		t.Errorf("unexpected redirect location on form purge: %s", loc)
+	}
+
+	// Test AJAX Purge Action
+	formAjax := url.Values{}
+	formAjax.Set("id", "55")
+	formAjax.Set("action", "purge")
+	reqAjax := httptest.NewRequest(http.MethodPost, "/admin/archives/action", strings.NewReader(formAjax.Encode()))
+	reqAjax.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqAjax.Header.Set("Accept", "application/json")
+	reqAjax.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAjax := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAjax, reqAjax)
+	if wAjax.Code != http.StatusOK {
+		t.Errorf("expected 200 on AJAX purge, got %d", wAjax.Code)
+	}
+	var ajaxResp map[string]any
+	if err := json.Unmarshal(wAjax.Body.Bytes(), &ajaxResp); err != nil || ajaxResp["success"] != true {
+		t.Errorf("unexpected AJAX response: %v", wAjax.Body.String())
+	}
+
+	// 5. Verify Unified Audit Logs recorded
+	logs, err := db.ListAuditLogs(ctx, 20)
+	if err != nil {
+		t.Fatalf("failed to list audit logs: %v", err)
+	}
+	foundRestore := false
+	foundPurge := false
+	for _, l := range logs {
+		if l.Action == "archive_restore" && l.Status == "SUCCESS" {
+			foundRestore = true
+		}
+		if l.Action == "archive_purge" && l.Status == "SUCCESS" {
+			foundPurge = true
+		}
+	}
+	if !foundRestore {
+		t.Errorf("expected audit log for archive_restore")
+	}
+	if !foundPurge {
+		t.Errorf("expected audit log for archive_purge")
+	}
+}
+

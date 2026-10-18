@@ -830,6 +830,10 @@ var (
                 <div class="stat-value">{{.RunningStacksCount}} / {{.TotalStacks}} <span style="font-size: 14px; font-weight: normal; color: var(--accent-green);">Active</span></div>
             </div>
             <div class="stat-card">
+                <div class="stat-title">Archived Stacks</div>
+                <div class="stat-value">{{.TotalArchives}} <span style="font-size: 13px; font-weight: normal; color: var(--accent-amber);">Cooldown</span></div>
+            </div>
+            <div class="stat-card">
                 <div class="stat-title">Linked Users</div>
                 <div class="stat-value">{{.TotalUsers}}</div>
             </div>
@@ -847,6 +851,9 @@ var (
         <div class="nav-tabs">
             <button type="button" id="tab-btn-stacks" class="nav-tab active" onclick="switchTab('stacks')">
                 <span>🐳</span> Docker Compose Stacks ({{len .Projects}})
+            </button>
+            <button type="button" id="tab-btn-archives" class="nav-tab" onclick="switchTab('archives')">
+                <span>📦</span> Archived Stacks ({{.TotalArchives}})
             </button>
             <button type="button" id="tab-btn-users" class="nav-tab" onclick="switchTab('users')">
                 <span>👥</span> Users & Role RBAC ({{.TotalUsers}})
@@ -949,6 +956,81 @@ var (
                                 <div style="font-size: 24px; margin-bottom: 8px;">🐳</div>
                                 <div style="font-size: 15px; margin-bottom: 4px;">No Docker Compose stacks found in Fenrir Daemon.</div>
                                 <div style="font-size: 13px;">Deploy a new stack from Discord using <code>/stack deploy &lt;name&gt; &lt;compose&gt;</code>.</div>
+                            </td>
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Archived Stacks Tab Panel -->
+        <div id="tab-panel-archives" class="tab-panel">
+            <div class="section-title">
+                <span>Archived Stacks & 90-Day Retention Cooldown Backups</span>
+            </div>
+            <div class="card">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Archive ID</th>
+                            <th>Project / Stack Name</th>
+                            <th>Archive File Size</th>
+                            <th>Archived At (UTC)</th>
+                            <th>Expiration Date (UTC)</th>
+                            <th>Auto-Deletion</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{range .Archives}}
+                        <tr>
+                            <td class="mono">
+                                <span class="badge-system">#{{.GetIDString}}</span>
+                            </td>
+                            <td>
+                                <strong style="font-size: 15px; color: var(--accent-blue);">{{.ProjectName}}</strong>
+                            </td>
+                            <td class="mono" style="font-size: 13px;">
+                                <strong>{{.FormattedSize}}</strong>
+                                {{if gt .FileSize 0}}<span style="color: var(--text-secondary); font-size: 11px; margin-left: 4px;">({{.FileSize}} B)</span>{{end}}
+                            </td>
+                            <td class="mono" style="color: var(--text-secondary); font-size: 12px;">
+                                {{if not .CreatedAt.IsZero}}{{.CreatedAt.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}
+                            </td>
+                            <td class="mono" style="color: var(--text-secondary); font-size: 12px;">
+                                {{if not .ExpiresAt.IsZero}}{{.ExpiresAt.Format "2006-01-02 15:04:05"}}{{else}}-{{end}}
+                            </td>
+                            <td>
+                                <span class="status-pill {{if gt .DaysUntilDeletion 30}}status-running{{else if gt .DaysUntilDeletion 7}}status-degraded{{else}}status-stopped{{end}}" title="Days remaining until auto-deletion">
+                                    ⏳ {{.DaysUntilDeletion}} days remaining
+                                </span>
+                            </td>
+                            <td>
+                                <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                                    {{if or (eq $.CurrentUser.Role "Admin") (eq $.CurrentUser.Role "admin")}}
+                                    <form method="POST" action="/admin/archives/action" style="display:inline; margin:0;" onsubmit="return confirm('Restore archived stack \'{{.ProjectName}}\' back into the stack directory?');">
+                                        <input type="hidden" name="id" value="{{.GetIDString}}">
+                                        <input type="hidden" name="action" value="restore">
+                                        <button type="submit" class="btn-view-compose" style="color: #4ade80; border-color: rgba(74, 222, 128, 0.4);" title="Restore stack backup">
+                                            <span>📦</span> Restore
+                                        </button>
+                                    </form>
+                                    <button type="button" class="btn-view-compose" style="color: #f87171; border-color: rgba(239, 68, 68, 0.4);" onclick="openPurgeModal('{{.GetIDString}}', '{{.ProjectName}}')" title="Permanently delete archive">
+                                        <span>🗑️</span> Purge Now
+                                    </button>
+                                    {{else}}
+                                    <span style="color: var(--text-secondary); font-size: 12px; font-style: italic;">Admin required</span>
+                                    {{end}}
+                                </div>
+                            </td>
+                        </tr>
+                        {{else}}
+                        <tr>
+                            <td colspan="7" style="text-align: center; color: var(--text-secondary); padding: 40px;">
+                                <div style="font-size: 24px; margin-bottom: 8px;">📦</div>
+                                <div style="font-size: 15px; margin-bottom: 4px;">No archived stacks found on 90-day retention cooldown.</div>
+                                <div style="font-size: 13px;">When a Docker Compose stack is torn down, its backup archive will appear here for restoration or permanent purging.</div>
                             </td>
                         </tr>
                         {{end}}
@@ -1118,12 +1200,51 @@ var (
         </div>
     </div>
 
+    <!-- Purge Archive Confirmation Modal -->
+    <div id="purgeModal" class="modal-overlay" onclick="onPurgeModalOverlayClick(event)">
+        <div class="modal-card" style="max-width: 520px;">
+            <div class="modal-header" style="border-bottom: 1px solid rgba(239, 68, 68, 0.3);">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 22px;">⚠️</span>
+                    <h3 style="margin: 0; font-size: 16px; color: #f87171;">Confirm Permanent Archive Purge</h3>
+                </div>
+                <button type="button" class="btn-close" onclick="closePurgeModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p style="color: var(--text-primary); margin-bottom: 16px; font-size: 14px; line-height: 1.5;">
+                    Are you sure you want to permanently purge the archive for stack <strong id="purgeModalProject" style="color: var(--accent-blue);"></strong>?
+                </p>
+                <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 14px; margin-bottom: 16px;">
+                    <div style="font-weight: 600; color: #f87171; margin-bottom: 6px; font-size: 13px; display: flex; align-items: center; gap: 6px;">
+                        <span>🚨</span> PERMANENT &amp; IRREVERSIBLE ACTION
+                    </div>
+                    <div style="font-size: 13px; color: #fca5a5; line-height: 1.5;">
+                        This action <strong>cannot be undone</strong>. The archive file will be immediately removed from disk storage and its database record cleared from Fenrir Daemon.
+                    </div>
+                </div>
+                <div style="font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">
+                    Archive ID: <span id="purgeModalId">-</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-copy" onclick="closePurgeModal()">Cancel</button>
+                <form id="purgeModalForm" method="POST" action="/admin/archives/action" style="margin: 0; display: inline;">
+                    <input type="hidden" name="id" id="purgeModalInputId" value="">
+                    <input type="hidden" name="action" value="purge">
+                    <button type="submit" class="btn-view-compose" style="background: #dc2626; color: white; border-color: #ef4444; font-weight: 600; box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);">
+                        <span>🗑️</span> Purge Permanently
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
     <script>
         let currentStackName = '';
         let currentEditorMode = 'compose'; // 'compose' or 'yaml'
 
         function switchTab(tabName) {
-            const tabs = ['stacks', 'users', 'audit'];
+            const tabs = ['stacks', 'archives', 'users', 'audit'];
             tabs.forEach(t => {
                 const btn = document.getElementById('tab-btn-' + t);
                 const panel = document.getElementById('tab-panel-' + t);
@@ -1435,6 +1556,23 @@ var (
             }
         }
 
+        function openPurgeModal(archiveId, projectName) {
+            document.getElementById('purgeModalId').textContent = archiveId;
+            document.getElementById('purgeModalProject').textContent = projectName;
+            document.getElementById('purgeModalInputId').value = archiveId;
+            document.getElementById('purgeModal').classList.add('open');
+        }
+
+        function closePurgeModal() {
+            document.getElementById('purgeModal').classList.remove('open');
+        }
+
+        function onPurgeModalOverlayClick(e) {
+            if (e.target && e.target.id === 'purgeModal') {
+                closePurgeModal();
+            }
+        }
+
         // Support Tab key in editor textarea for 2 spaces indentation
         document.addEventListener('DOMContentLoaded', () => {
             const editor = document.getElementById('modalComposeEditor');
@@ -1456,13 +1594,14 @@ var (
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 closeComposeModal();
+                closePurgeModal();
             }
         });
 
         // Initialize active tab from URL hash or server preference
         window.addEventListener('DOMContentLoaded', () => {
             const hash = (window.location.hash || '').replace('#', '');
-            if (hash === 'users' || hash === 'audit' || hash === 'stacks') {
+            if (hash === 'users' || hash === 'audit' || hash === 'stacks' || hash === 'archives') {
                 switchTab(hash);
             } else {
                 switchTab('{{.ActiveTab}}' || 'stacks');

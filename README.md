@@ -26,10 +26,10 @@
   - Secure HTTP client communicating with Fenrir Daemon via `Bearer` and `X-API-Key` headers.
   - Support for health checks, host telemetry (CPU, RAM, Disk), and stack lifecycle execution.
 
-- **Fallback Admin Control Panel (`/admin`)**:
+- **Admin Control Panel (`/admin`)**:
   - Responsive web dashboard for managing linked Discord user roles.
   - Real-time audit activity feed displaying execution logs, user IDs, target stacks, and status.
-  - Protected via `SKOLL_ADMIN_KEY` (supports cookie, header, basic auth, or query parameter).
+  - Protected strictly via Discord OAuth2 authentication and database RBAC (Operator/Admin).
 
 ---
 
@@ -79,7 +79,6 @@ flowchart TD
 | `SKOLL_PORT` | `8081` | Port or address for the HTTP server (e.g. `:8081` or `8081`). |
 | `SKOLL_PUBLIC_URL` | `http://localhost:8081` | Public base URL used for OAuth2 callback redirects. |
 | `SKOLL_DB_PATH` | `skoll.db` | Filesystem path to the embedded SQLite database. |
-| `SKOLL_ADMIN_KEY` | `skoll-admin-secret` | Pre-shared secret required to access the `/admin` UI. |
 | `DISCORD_BOT_TOKEN` | *(required for bot)* | Discord Bot Token from the Discord Developer Portal. |
 | `DISCORD_CLIENT_ID` | *(required for bot)* | Discord Application Client ID. |
 | `DISCORD_CLIENT_SECRET` | *(required for oauth)*| Discord Application Client Secret. |
@@ -142,12 +141,14 @@ Starts or stops a specific container stack.
 
 ---
 
-## 🖥️ Fallback Admin Control Panel (`/admin`)
+## 🖥️ Admin Control Panel (`/admin`)
 
 Sköll includes a built-in web dashboard accessible at:
 ```
-http://localhost:8081/admin?key=skoll-admin-secret
+http://localhost:8081/admin
 ```
+
+Authentication is strictly managed via Discord OAuth2 (`/login`). Users must possess an active database role of **Operator** or **Admin** to access the dashboard and execute management actions. No legacy static admin keys or master backdoors exist.
 
 ### Features:
 - **Docker Stacks & Compose/YAML Editor**: Tabbed interface listing registered Fenrir stacks, container statuses, active ports, images, and an interactive dark-mode code editor with live line/char counters, Tab-indentation support, dry-run validation, and direct editing of both `compose.yml` and auxiliary YAML files (e.g. `config.yml`).
@@ -158,11 +159,11 @@ http://localhost:8081/admin?key=skoll-admin-secret
 
 ### REST API Endpoints:
 - `GET /health` — Service health probe.
-- `GET /api/v1/users` — List linked users (Header: `X-Admin-Key: <key>`).
-- `POST /api/v1/users/{id}/role` — Update user role (JSON: `{"role": "Operator"}`).
-- `GET /api/v1/audit-logs` — Fetch audit logs (Query: `?limit=50`).
-- `GET /api/v1/stacks` — List active Fenrir stacks and container details.
-- `GET /api/v1/stacks/{name}/compose` — Fetch raw `compose.yml` for a stack.
+- `GET /api/v1/users` — List linked users (**Admin only**).
+- `POST /api/v1/users/{id}/role` — Update user role (**Admin only**, JSON: `{"role": "Operator"}`).
+- `GET /api/v1/audit-logs` — Fetch audit logs (**Operator+**, Query: `?limit=50`).
+- `GET /api/v1/stacks` — List active Fenrir stacks and container details (**Operator+**).
+- `GET /api/v1/stacks/{name}/compose` — Fetch raw `compose.yml` for a stack (**Admin only**).
 - `PUT /api/v1/projects/{name}/compose` (or `/api/v1/stacks/{name}/compose`) — Update compose definition (**Admin only**, accepts raw YAML or JSON body with `compose`, `yaml`, `content`, or `composeContent`, supports `?redeploy=false` and `?dry_run=true`).
 - `PUT /api/v1/projects/{name}/yaml/{filename}` (or `/api/v1/stacks/{name}/yaml/{filename}`) — Update auxiliary YAML configuration file (**Admin only**, accepts raw YAML or JSON body, supports `?restart=true`).
 - `GET /api/v1/projects/{name}/yaml/{filename}` (or `/api/v1/stacks/{name}/yaml/{filename}`) — Fetch auxiliary YAML configuration file (**Admin only**).

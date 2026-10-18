@@ -151,8 +151,9 @@ http://localhost:8081/admin?key=skoll-admin-secret
 
 ### Features:
 - **Docker Stacks & Compose/YAML Editor**: Tabbed interface listing registered Fenrir stacks, container statuses, active ports, images, and an interactive dark-mode code editor with live line/char counters, Tab-indentation support, dry-run validation, and direct editing of both `compose.yml` and auxiliary YAML files (e.g. `config.yml`).
+- **Archived Stacks Management (90-Day Retention Cooldown)**: Dedicated dashboard tab for inspecting archived stacks retrieved from Fenrir's `GET /api/v1/archives`. Displays project name, archive file size, creation timestamp, expiration date, and calculated days remaining until auto-deletion (`daysUntilDeletion`). Supports 1-click stack restoration (`POST /api/v1/archives/{id}/restore`) and permanent purging (`DELETE /api/v1/archives/{id}`) guarded by an interactive confirmation modal.
 - **User Role Management**: View all linked users and modify their roles (Admin, Operator, Viewer, Unlinked) via an instant form update.
-- **Audit Feed**: Complete activity trail showing timestamps, Discord usernames, Discord user IDs, actions (e.g. `server_restart`, `stack_deploy`, `compose_update`, `yaml_update`), target stacks, and execution statuses (`SUCCESS`, `FAILED`, `UNAUTHORIZED`).
+- **Audit Feed**: Complete activity trail showing timestamps, Discord usernames, Discord user IDs, actions (e.g. `server_restart`, `stack_deploy`, `compose_update`, `yaml_update`, `archive_restore`, `archive_purge`), target stacks, and execution statuses (`SUCCESS`, `FAILED`, `UNAUTHORIZED`).
 - **Daemon Telemetry**: Real-time connectivity indicator with Fenrir Daemon.
 
 ### REST API Endpoints:
@@ -165,6 +166,9 @@ http://localhost:8081/admin?key=skoll-admin-secret
 - `PUT /api/v1/projects/{name}/compose` (or `/api/v1/stacks/{name}/compose`) — Update compose definition (**Admin only**, accepts raw YAML or JSON body with `compose`, `yaml`, `content`, or `composeContent`, supports `?redeploy=false` and `?dry_run=true`).
 - `PUT /api/v1/projects/{name}/yaml/{filename}` (or `/api/v1/stacks/{name}/yaml/{filename}`) — Update auxiliary YAML configuration file (**Admin only**, accepts raw YAML or JSON body, supports `?restart=true`).
 - `GET /api/v1/projects/{name}/yaml/{filename}` (or `/api/v1/stacks/{name}/yaml/{filename}`) — Fetch auxiliary YAML configuration file (**Admin only**).
+- `GET /api/v1/archives` — List archived stacks on 90-day retention cooldown (**Operator+**).
+- `POST /api/v1/archives/{id}/restore` — Restore archived stack backup back into stack directory (**Admin only**).
+- `DELETE /api/v1/archives/{id}` — Permanently purge archive backup from disk and clear database record (**Admin only**).
 
 ---
 

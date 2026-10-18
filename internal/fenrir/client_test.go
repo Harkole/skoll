@@ -3,6 +3,7 @@ package fenrir
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -509,5 +510,132 @@ func TestFenrirRealPayloadStrictMapping(t *testing.T) {
 		t.Errorf("unexpected service status mapping: %+v", svc)
 	}
 }
+
+func TestFenrirArchives(t *testing.T) {
+	expectedKey := "test-fenrir-secret"
+
+	var restoredID string
+	var deletedID string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify auth header
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Bearer "+expectedKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/archives":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{
+						"id":                1,
+						"projectName":       "ghost-blog",
+						"fileSize":          5242880, // 5 MB
+						"createdAt":         time.Now().Add(-10 * 24 * time.Hour).Format(time.RFC3339),
+						"expiresAt":         time.Now().Add(80 * 24 * time.Hour).Format(time.RFC3339),
+						"daysUntilDeletion": 80,
+					},
+					{
+						"id":                "archive-uuid-2",
+						"project_name":      "redis-cache",
+						"file_size":         1048576, // 1 MB
+						"created_at":        time.Now().Add(-2 * 24 * time.Hour).Format(time.RFC3339),
+						"expires_at":        time.Now().Add(88 * 24 * time.Hour).Format(time.RFC3339),
+						"days_until_deletion": 88,
+					},
+				},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/archives/1/restore":
+			restoredID = "1"
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "restored"})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/archives/1":
+			deletedID = "1"
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "purged"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, expectedKey, 5*time.Second)
+	ctx := context.Background()
+
+	// 1. List archives
+	archives, err := client.ListArchives(ctx)
+	if err != nil {
+		t.Fatalf("unexpected ListArchives error: %v", err)
+	}
+	if len(archives) != 2 {
+		t.Fatalf("expected 2 archives, got %d", len(archives))
+	}
+	if archives[0].ProjectName != "ghost-blog" || archives[0].GetIDString() != "1" || archives[0].DaysUntilDeletion != 80 {
+		t.Errorf("unexpected archive[0]: %+v", archives[0])
+	}
+	if archives[1].ProjectName != "redis-cache" || archives[1].GetIDString() != "archive-uuid-2" || archives[1].DaysUntilDeletion != 88 {
+		t.Errorf("unexpected archive[1]: %+v", archives[1])
+	}
+
+	// 2. Restore archive
+	if err := client.RestoreArchive(ctx, 1); err != nil {
+		t.Fatalf("unexpected RestoreArchive error: %v", err)
+	}
+	if restoredID != "1" {
+		t.Errorf("expected restore on ID '1', got '%s'", restoredID)
+	}
+
+	// 3. Delete archive
+	if err := client.DeleteArchive(ctx, 1); err != nil {
+		t.Fatalf("unexpected DeleteArchive error: %v", err)
+	}
+	if deletedID != "1" {
+		t.Errorf("expected delete on ID '1', got '%s'", deletedID)
+	}
+
+	// 4. PurgeArchive alias
+	deletedID = ""
+	if err := client.PurgeArchive(ctx, 1); err != nil {
+		t.Fatalf("unexpected PurgeArchive error: %v", err)
+	}
+	if deletedID != "1" {
+		t.Errorf("expected purge on ID '1', got '%s'", deletedID)
+	}
+}
+
+func TestArchiveModelCalculations(t *testing.T) {
+	// Test auto-calculation of retention and DaysUntilDeletion when not provided in JSON
+	now := time.Now()
+	createdAt := now.Add(-5 * 24 * time.Hour) // 5 days ago
+
+	rawJSON := fmt.Sprintf(`{
+		"id": 105,
+		"projectName": "web-stack",
+		"fileSize": 2097152,
+		"createdAt": "%s"
+	}`, createdAt.Format(time.RFC3339))
+
+	var a Archive
+	if err := json.Unmarshal([]byte(rawJSON), &a); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if a.ID != 105 || a.GetIDString() != "105" {
+		t.Errorf("expected ID 105, got %d (%s)", a.ID, a.GetIDString())
+	}
+	if a.FormattedSize() != "2.00 MB" {
+		t.Errorf("expected '2.00 MB', got '%s'", a.FormattedSize())
+	}
+	// ExpiresAt should be calculated as createdAt + 90 days = 85 days remaining
+	if a.DaysUntilDeletion < 84 || a.DaysUntilDeletion > 86 {
+		t.Errorf("expected ~85 days until deletion, got %d", a.DaysUntilDeletion)
+	}
+}
+
 
 

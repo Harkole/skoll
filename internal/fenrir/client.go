@@ -466,3 +466,37 @@ func (c *Client) GetProjectYAML(ctx context.Context, name, filename string) (str
 	return string(bodyBytes), nil
 }
 
+// ListArchives retrieves all archived stacks currently on 90-day retention cooldown from Fenrir via GET /api/v1/archives.
+func (c *Client) ListArchives(ctx context.Context) ([]Archive, error) {
+	var archives []Archive
+	if err := c.do(ctx, http.MethodGet, "/api/v1/archives", nil, &archives); err != nil {
+		// Fallback for wrapped responses
+		var payload struct {
+			Archives []Archive `json:"archives"`
+		}
+		if errFallback := c.do(ctx, http.MethodGet, "/api/v1/archives", nil, &payload); errFallback == nil && len(payload.Archives) > 0 {
+			return payload.Archives, nil
+		}
+		return nil, err
+	}
+	return archives, nil
+}
+
+// RestoreArchive calls Fenrir's POST /api/v1/archives/{id}/restore endpoint to restore the backup back into the stack directory.
+func (c *Client) RestoreArchive(ctx context.Context, id any) error {
+	path := fmt.Sprintf("/api/v1/archives/%s/restore", url.PathEscape(fmt.Sprintf("%v", id)))
+	return c.do(ctx, http.MethodPost, path, nil, nil)
+}
+
+// DeleteArchive calls Fenrir's DELETE /api/v1/archives/{id} endpoint to immediately remove the archive file from disk and clear its database record.
+func (c *Client) DeleteArchive(ctx context.Context, id any) error {
+	path := fmt.Sprintf("/api/v1/archives/%s", url.PathEscape(fmt.Sprintf("%v", id)))
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// PurgeArchive is an alias for DeleteArchive.
+func (c *Client) PurgeArchive(ctx context.Context, id any) error {
+	return c.DeleteArchive(ctx, id)
+}
+
+

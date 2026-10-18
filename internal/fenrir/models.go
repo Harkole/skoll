@@ -2,6 +2,9 @@ package fenrir
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
+	"strconv"
 	"time"
 )
 
@@ -200,3 +203,146 @@ type APIResponse struct {
 	Error   string          `json:"error,omitempty"`
 	Message string          `json:"message,omitempty"`
 }
+
+// Archive represents a backed-up Docker Compose stack on 90-day retention cooldown.
+type Archive struct {
+	ID                int64     `json:"id"`
+	IDStr             string    `json:"id_str,omitempty"`
+	ProjectName       string    `json:"projectName"`
+	FilePath          string    `json:"filePath,omitempty"`
+	FileSize          int64     `json:"fileSize"`
+	CreatedAt         time.Time `json:"createdAt"`
+	ExpiresAt         time.Time `json:"expiresAt"`
+	DaysUntilDeletion int       `json:"daysUntilDeletion"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling to flexibly accept camelCase,
+// snake_case, string or numeric IDs, and calculate retention cooldown metrics.
+func (a *Archive) UnmarshalJSON(data []byte) error {
+	type Alias Archive
+	aux := &struct {
+		RawID              any        `json:"id"`
+		ProjectNameAlt     string     `json:"project_name"`
+		NameAlt            string     `json:"name"`
+		ProjectAlt         string     `json:"project"`
+		FileSizeAlt        *int64     `json:"file_size"`
+		SizeAlt            *int64     `json:"size"`
+		SizeBytesAlt       *int64     `json:"sizeBytes"`
+		ArchiveSizeAlt     *int64     `json:"archive_file_size"`
+		CreatedAtAlt       *time.Time `json:"created_at"`
+		ExpiresAtAlt       *time.Time `json:"expires_at"`
+		ExpirationDateAlt  *time.Time `json:"expirationDate"`
+		ExpirationDateAlt2 *time.Time `json:"expiration_date"`
+		DaysUntilDelAlt    *int       `json:"days_until_deletion"`
+		DaysRemainingAlt   *int       `json:"daysRemaining"`
+		*Alias
+	}{
+		Alias: (*Alias)(a),
+	}
+
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	if aux.RawID != nil {
+		switch v := aux.RawID.(type) {
+		case float64:
+			a.ID = int64(v)
+			a.IDStr = strconv.FormatInt(a.ID, 10)
+		case string:
+			a.IDStr = v
+			if idNum, err := strconv.ParseInt(v, 10, 64); err == nil {
+				a.ID = idNum
+			}
+		case int64:
+			a.ID = v
+			a.IDStr = strconv.FormatInt(v, 10)
+		}
+	} else if a.ID != 0 {
+		a.IDStr = strconv.FormatInt(a.ID, 10)
+	}
+
+	if a.ProjectName == "" {
+		if aux.ProjectNameAlt != "" {
+			a.ProjectName = aux.ProjectNameAlt
+		} else if aux.NameAlt != "" {
+			a.ProjectName = aux.NameAlt
+		} else if aux.ProjectAlt != "" {
+			a.ProjectName = aux.ProjectAlt
+		}
+	}
+
+	if a.FileSize == 0 {
+		if aux.FileSizeAlt != nil {
+			a.FileSize = *aux.FileSizeAlt
+		} else if aux.SizeAlt != nil {
+			a.FileSize = *aux.SizeAlt
+		} else if aux.SizeBytesAlt != nil {
+			a.FileSize = *aux.SizeBytesAlt
+		} else if aux.ArchiveSizeAlt != nil {
+			a.FileSize = *aux.ArchiveSizeAlt
+		}
+	}
+
+	if a.CreatedAt.IsZero() && aux.CreatedAtAlt != nil {
+		a.CreatedAt = *aux.CreatedAtAlt
+	}
+
+	if a.ExpiresAt.IsZero() {
+		if aux.ExpiresAtAlt != nil {
+			a.ExpiresAt = *aux.ExpiresAtAlt
+		} else if aux.ExpirationDateAlt != nil {
+			a.ExpiresAt = *aux.ExpirationDateAlt
+		} else if aux.ExpirationDateAlt2 != nil {
+			a.ExpiresAt = *aux.ExpirationDateAlt2
+		}
+	}
+
+	// Default to 90-day retention if CreatedAt is present and ExpiresAt was not explicitly set
+	if a.ExpiresAt.IsZero() && !a.CreatedAt.IsZero() {
+		a.ExpiresAt = a.CreatedAt.Add(90 * 24 * time.Hour)
+	}
+
+	if a.DaysUntilDeletion == 0 {
+		if aux.DaysUntilDelAlt != nil {
+			a.DaysUntilDeletion = *aux.DaysUntilDelAlt
+		} else if aux.DaysRemainingAlt != nil {
+			a.DaysUntilDeletion = *aux.DaysRemainingAlt
+		}
+	}
+
+	// Calculate days remaining until auto-deletion if missing or 0 and ExpiresAt is set
+	if a.DaysUntilDeletion <= 0 && !a.ExpiresAt.IsZero() {
+		days := int(math.Ceil(time.Until(a.ExpiresAt).Hours() / 24.0))
+		if days < 0 {
+			days = 0
+		}
+		a.DaysUntilDeletion = days
+	}
+
+	return nil
+}
+
+// FormattedSize returns a clean human-readable representation of archive file size.
+func (a *Archive) FormattedSize() string {
+	b := a.FileSize
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// GetIDString returns the string representation of the archive ID.
+func (a *Archive) GetIDString() string {
+	if a.IDStr != "" {
+		return a.IDStr
+	}
+	return strconv.FormatInt(a.ID, 10)
+}
+

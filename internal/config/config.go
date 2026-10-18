@@ -21,6 +21,7 @@ type Config struct {
 	DiscordClientID     string
 	DiscordClientSecret string
 	DiscordRedirectURI  string
+	DiscordGuildID      string // Target Guild ID for instant slash command sync without global 1hr cache delay
 	SessionSecret       string // Secret key for AES-256 session encryption
 
 	// Fenrir Daemon connection
@@ -58,6 +59,8 @@ func Load() (*Config, error) {
 	fenrirURL := strings.TrimRight(getEnv("FENRIR_API_URL", "http://localhost:8080"), "/")
 	fenrirKey := getEnv("FENRIR_API_KEY", "")
 
+	guildID := getEnv("DISCORD_GUILD_ID", getEnv("SKOLL_DISCORD_GUILD_ID", ""))
+
 	timeoutSec := getEnvAsInt("SKOLL_HTTP_TIMEOUT_SECONDS", 15)
 
 	cfg := &Config{
@@ -69,6 +72,7 @@ func Load() (*Config, error) {
 		DiscordClientID:     clientID,
 		DiscordClientSecret: clientSecret,
 		DiscordRedirectURI:  redirectURI,
+		DiscordGuildID:      guildID,
 		SessionSecret:       sessionSecret,
 		FenrirAPIURL:        fenrirURL,
 		FenrirAPIKey:        fenrirKey,

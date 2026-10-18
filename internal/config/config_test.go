@@ -11,7 +11,7 @@ func TestConfigDefaults(t *testing.T) {
 	keys := []string{
 		"SKOLL_PORT", "SKOLL_DB_PATH", "SKOLL_PUBLIC_URL", "SKOLL_ADMIN_KEY",
 		"DISCORD_BOT_TOKEN", "DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET",
-		"DISCORD_REDIRECT_URI", "FENRIR_API_URL", "FENRIR_API_KEY",
+		"DISCORD_REDIRECT_URI", "DISCORD_GUILD_ID", "FENRIR_API_URL", "FENRIR_API_KEY",
 	}
 	for _, k := range keys {
 		_ = os.Unsetenv(k)
@@ -57,6 +57,7 @@ func TestConfigCustomEnv(t *testing.T) {
 	_ = os.Setenv("DISCORD_CLIENT_ID", "client_123")
 	_ = os.Setenv("DISCORD_CLIENT_SECRET", "secret_123")
 	_ = os.Setenv("DISCORD_REDIRECT_URI", "http://custom.domain/auth/callback")
+	_ = os.Setenv("DISCORD_GUILD_ID", "998877665544")
 	_ = os.Setenv("SKOLL_SESSION_SECRET", "custom_session_secret_32_bytes_long!")
 	_ = os.Setenv("FENRIR_API_URL", "http://fenrir.local:8080")
 	_ = os.Setenv("FENRIR_API_KEY", "fenrir_key_xyz")
@@ -67,6 +68,7 @@ func TestConfigCustomEnv(t *testing.T) {
 		_ = os.Unsetenv("DISCORD_CLIENT_ID")
 		_ = os.Unsetenv("DISCORD_CLIENT_SECRET")
 		_ = os.Unsetenv("DISCORD_REDIRECT_URI")
+		_ = os.Unsetenv("DISCORD_GUILD_ID")
 		_ = os.Unsetenv("SKOLL_SESSION_SECRET")
 		_ = os.Unsetenv("FENRIR_API_URL")
 		_ = os.Unsetenv("FENRIR_API_KEY")
@@ -85,6 +87,9 @@ func TestConfigCustomEnv(t *testing.T) {
 	}
 	if cfg.DiscordRedirectURI != "http://custom.domain/auth/callback" {
 		t.Errorf("expected custom redirect URI, got %s", cfg.DiscordRedirectURI)
+	}
+	if cfg.DiscordGuildID != "998877665544" {
+		t.Errorf("expected custom guild ID 998877665544, got %s", cfg.DiscordGuildID)
 	}
 	if cfg.SessionSecret != "custom_session_secret_32_bytes_long!" {
 		t.Errorf("expected custom session secret, got %s", cfg.SessionSecret)

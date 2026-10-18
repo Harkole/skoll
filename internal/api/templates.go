@@ -902,12 +902,44 @@ var (
                             <td>
                                 <textarea id="compose-data-{{.Name}}" style="display:none;">{{.Compose}}</textarea>
                                 <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                                    {{if or (eq $.CurrentUser.Role "Admin") (eq $.CurrentUser.Role "admin") (eq $.CurrentUser.Role "Operator") (eq $.CurrentUser.Role "operator")}}
+                                    <form method="POST" action="/admin/stacks/action" style="display:inline; margin:0;">
+                                        <input type="hidden" name="name" value="{{.Name}}">
+                                        <input type="hidden" name="action" value="start">
+                                        <button type="submit" class="btn-view-compose" style="color: #4ade80; border-color: rgba(74, 222, 128, 0.4);" title="Start stack">
+                                            <span>▶️</span> Start
+                                        </button>
+                                    </form>
+                                    <form method="POST" action="/admin/stacks/action" style="display:inline; margin:0;">
+                                        <input type="hidden" name="name" value="{{.Name}}">
+                                        <input type="hidden" name="action" value="stop">
+                                        <button type="submit" class="btn-view-compose" style="color: #facc15; border-color: rgba(250, 204, 21, 0.4);" title="Stop stack">
+                                            <span>⏹️</span> Stop
+                                        </button>
+                                    </form>
+                                    <form method="POST" action="/admin/stacks/action" style="display:inline; margin:0;">
+                                        <input type="hidden" name="name" value="{{.Name}}">
+                                        <input type="hidden" name="action" value="restart">
+                                        <button type="submit" class="btn-view-compose" style="color: #38bdf8; border-color: rgba(56, 189, 248, 0.4);" title="Restart stack">
+                                            <span>🔄</span> Restart
+                                        </button>
+                                    </form>
+                                    {{end}}
+                                    {{if or (eq $.CurrentUser.Role "Admin") (eq $.CurrentUser.Role "admin")}}
                                     <button type="button" class="btn-view-compose" onclick="showComposeModal('{{.Name}}', 'compose')">
                                         <span>📝</span> Edit Compose
                                     </button>
                                     <button type="button" class="btn-view-compose" style="color: #c084fc; border-color: rgba(168, 85, 247, 0.4);" onclick="showComposeModal('{{.Name}}', 'yaml')">
                                         <span>⚙️</span> Edit Config
                                     </button>
+                                    <form method="POST" action="/admin/stacks/action" style="display:inline; margin:0;" onsubmit="return confirm('Are you sure you want to tear down and archive stack {{.Name}}? All services will be stopped and a 90-day retention archive will be created.');">
+                                        <input type="hidden" name="name" value="{{.Name}}">
+                                        <input type="hidden" name="action" value="delete">
+                                        <button type="submit" class="btn-view-compose" style="color: #f87171; border-color: rgba(239, 68, 68, 0.4);">
+                                            <span>🗑️</span> Delete
+                                        </button>
+                                    </form>
+                                    {{end}}
                                 </div>
                             </td>
                         </tr>

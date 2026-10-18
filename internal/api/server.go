@@ -113,6 +113,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/users/{id}/role", s.handleAPIUpdateRole)
 	s.mux.HandleFunc("GET /api/v1/audit-logs", s.handleAPIListAuditLogs)
 	s.mux.HandleFunc("GET /api/v1/stacks", s.handleAPIListStacks)
+	s.mux.HandleFunc("POST /api/v1/stacks", s.handleAPIDeployStack)
+	s.mux.HandleFunc("POST /api/v1/projects", s.handleAPIDeployStack)
 	s.mux.HandleFunc("GET /api/v1/stacks/{name}/compose", s.handleAPIGetStackCompose)
 	s.mux.HandleFunc("PUT /api/v1/stacks/{name}/compose", s.handleAPIUpdateStackCompose)
 	s.mux.HandleFunc("PUT /api/v1/projects/{name}/compose", s.handleAPIUpdateStackCompose)
@@ -121,8 +123,18 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/v1/stacks/{name}/yaml/{filename}", s.handleAPIUpdateStackYAML)
 	s.mux.HandleFunc("PUT /api/v1/projects/{name}/yaml/{filename}", s.handleAPIUpdateStackYAML)
 	s.mux.HandleFunc("POST /api/v1/stacks/{name}/restart", s.handleAPIStackRestart)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/restart", s.handleAPIStackRestart)
 	s.mux.HandleFunc("POST /api/v1/stacks/{name}/start", s.handleAPIStackStart)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/start", s.handleAPIStackStart)
 	s.mux.HandleFunc("POST /api/v1/stacks/{name}/stop", s.handleAPIStackStop)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/stop", s.handleAPIStackStop)
+	s.mux.HandleFunc("DELETE /api/v1/stacks/{name}", s.handleAPIDeleteStack)
+	s.mux.HandleFunc("DELETE /api/v1/projects/{name}", s.handleAPIDeleteStack)
+
+	// Container Lifecycle Controls (Operator+)
+	s.mux.HandleFunc("POST /api/v1/containers/{name}/start", func(w http.ResponseWriter, r *http.Request) { s.handleAPIContainerAction(w, r, "start") })
+	s.mux.HandleFunc("POST /api/v1/containers/{name}/stop", func(w http.ResponseWriter, r *http.Request) { s.handleAPIContainerAction(w, r, "stop") })
+	s.mux.HandleFunc("POST /api/v1/containers/{name}/restart", func(w http.ResponseWriter, r *http.Request) { s.handleAPIContainerAction(w, r, "restart") })
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -1248,7 +1260,169 @@ func (s *Server) executeStackOperation(w http.ResponseWriter, r *http.Request, n
 		return
 	}
 
-	user, ok := s.checkOperatorRBAC(w, r, "server_"+action, name)
+	var user *database.User
+	var ok bool
+	auditAction := "server_" + action
+	if action == "delete" || action == "teardown" {
+		auditAction = "stack_delete"
+		user, ok = s.checkAdminRBAC(w, r, auditAction, name)
+	} else {
+		user, ok = s.checkOperatorRBAC(w, r, auditAction, name)
+	}
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	var err error
+	if action == "delete" || action == "teardown" {
+		err = s.fenrirClient.DeleteProject(ctx, name)
+	} else {
+		switch action {
+		case "restart":
+			err = s.fenrirClient.RestartProject(ctx, name)
+		case "start":
+			err = s.fenrirClient.StartProject(ctx, name)
+		case "stop":
+			err = s.fenrirClient.StopProject(ctx, name)
+		default:
+			http.Error(w, `{"error":"invalid stack action"}`, http.StatusBadRequest)
+			return
+		}
+	}
+
+	if err != nil {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, auditAction, name, "FAILED")
+		if isWebForm {
+			http.Redirect(w, r, fmt.Sprintf("/admin?tab=stacks&notification=Error: %s", url.QueryEscape(err.Error())), http.StatusSeeOther)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, auditAction, name, "SUCCESS")
+
+	msg := fmt.Sprintf("Stack %s %sed successfully", name, action)
+	if action == "delete" || action == "teardown" {
+		msg = fmt.Sprintf("Stack %s torn down and archived successfully", name)
+	}
+
+	if isWebForm {
+		http.Redirect(w, r, fmt.Sprintf("/admin?tab=stacks&notification=%s", url.QueryEscape(msg)), http.StatusSeeOther)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"name":    name,
+		"action":  action,
+		"message": msg,
+	})
+}
+
+// handleAPIDeleteStack handles DELETE /api/v1/stacks/{name} and DELETE /api/v1/projects/{name}.
+func (s *Server) handleAPIDeleteStack(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		http.Error(w, `{"error":"missing stack name"}`, http.StatusBadRequest)
+		return
+	}
+
+	user, ok := s.checkAdminRBAC(w, r, "stack_delete", name)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	if err := s.fenrirClient.DeleteProject(ctx, name); err != nil {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "stack_delete", name, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "stack_delete", name, "SUCCESS")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"name":    name,
+		"message": fmt.Sprintf("Stack %s torn down and archived successfully", name),
+	})
+}
+
+// handleAPIDeployStack handles POST /api/v1/stacks and POST /api/v1/projects.
+func (s *Server) handleAPIDeployStack(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Name    string `json:"name"`
+		Compose string `json:"compose"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, `{"error":"invalid JSON request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	payload.Name = strings.TrimSpace(payload.Name)
+	if payload.Name == "" || strings.TrimSpace(payload.Compose) == "" {
+		http.Error(w, `{"error":"both 'name' and 'compose' are required"}`, http.StatusBadRequest)
+		return
+	}
+
+	user, ok := s.checkAdminRBAC(w, r, "stack_deploy", payload.Name)
+	if !ok {
+		return
+	}
+
+	if s.fenrirClient == nil {
+		http.Error(w, `{"error":"fenrir daemon client not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	if err := s.fenrirClient.DeployProject(ctx, payload.Name, payload.Compose); err != nil {
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "stack_deploy", payload.Name, "FAILED")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "stack_deploy", payload.Name, "SUCCESS")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"name":    payload.Name,
+		"message": fmt.Sprintf("Stack %s deployed successfully", payload.Name),
+	})
+}
+
+// handleAPIContainerAction handles container lifecycle actions (start/stop/restart) enforcing Operator/Admin RBAC.
+func (s *Server) handleAPIContainerAction(w http.ResponseWriter, r *http.Request, action string) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		http.Error(w, `{"error":"missing container name"}`, http.StatusBadRequest)
+		return
+	}
+
+	auditAction := "container_" + action
+	user, ok := s.checkOperatorRBAC(w, r, auditAction, name)
 	if !ok {
 		return
 	}
@@ -1261,41 +1435,32 @@ func (s *Server) executeStackOperation(w http.ResponseWriter, r *http.Request, n
 	ctx := r.Context()
 	var err error
 	switch action {
-	case "restart":
-		err = s.fenrirClient.RestartProject(ctx, name)
 	case "start":
-		err = s.fenrirClient.StartProject(ctx, name)
+		err = s.fenrirClient.StartContainer(ctx, name)
 	case "stop":
-		err = s.fenrirClient.StopProject(ctx, name)
+		err = s.fenrirClient.StopContainer(ctx, name)
+	case "restart":
+		err = s.fenrirClient.RestartContainer(ctx, name)
 	default:
-		http.Error(w, `{"error":"invalid stack action"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"invalid container action"}`, http.StatusBadRequest)
 		return
 	}
 
 	if err != nil {
-		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "server_"+action, name, "FAILED")
-		if isWebForm {
-			http.Redirect(w, r, fmt.Sprintf("/admin?tab=stacks&notification=Error: %s", url.QueryEscape(err.Error())), http.StatusSeeOther)
-			return
-		}
+		_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, auditAction, name, "FAILED")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
 		return
 	}
 
-	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, "server_"+action, name, "SUCCESS")
-
-	if isWebForm {
-		http.Redirect(w, r, fmt.Sprintf("/admin?tab=stacks&notification=Stack %s %sed successfully", url.QueryEscape(name), url.QueryEscape(action)), http.StatusSeeOther)
-		return
-	}
+	_ = s.db.RecordAuditLog(ctx, user.DiscordID, user.Username, auditAction, name, "SUCCESS")
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"success": true,
-		"name":    name,
-		"action":  action,
-		"message": fmt.Sprintf("Stack %s %sed successfully", name, action),
+		"success":   true,
+		"container": name,
+		"action":    action,
+		"message":   fmt.Sprintf("Container %s %sed successfully", name, action),
 	})
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -1258,5 +1259,285 @@ func TestAuthLogoutEndpoint(t *testing.T) {
 	}
 }
 
+func TestDestructiveAndControlEndpointsStrictAdminRBAC(t *testing.T) {
+	// 1. Mock Fenrir Daemon with delete, deploy, and container endpoints
+	deletedStacks := make(map[string]bool)
+	deployedStacks := make(map[string]string)
+	containerActions := make(map[string]string)
 
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/projects/"):
+			name := strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
+			deletedStacks[name] = true
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": "deleted", "project": name})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects":
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			deployedStacks[req["name"]] = req["compose"]
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": "created"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && strings.HasSuffix(r.URL.Path, "/restart"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "restarted"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && strings.HasSuffix(r.URL.Path, "/start"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "started"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && strings.HasSuffix(r.URL.Path, "/stop"):
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "stopped"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/containers/"):
+			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/containers/"), "/")
+			if len(parts) == 2 {
+				containerActions[parts[0]] = parts[1] // container: action
+			}
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+		}
+	}))
+	defer fenrirServer.Close()
 
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-key", 5*time.Second)
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_destructive_rbac.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	adminUser, _ := db.UpsertUser(ctx, "discord_admin_1", "AdminAlice", database.RoleAdmin)
+	operatorUser, _ := db.UpsertUser(ctx, "discord_op_1", "OperatorBob", database.RoleOperator)
+	viewerUser, _ := db.UpsertUser(ctx, "discord_viewer_1", "ViewerCharlie", database.RoleViewer)
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		AdminKey:     "master-admin-secret",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+
+	// --- 1. Stack Deletion (DELETE /api/v1/stacks/{name} & /projects/{name}) ---
+	// A. Viewer attempt -> 403
+	reqViewerDel := httptest.NewRequest(http.MethodDelete, "/api/v1/stacks/prod-minecraft", nil)
+	reqViewerDel.Header.Set("X-Discord-User-ID", viewerUser.DiscordID)
+	wViewerDel := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wViewerDel, reqViewerDel)
+	if wViewerDel.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Viewer stack delete, got %d", wViewerDel.Code)
+	}
+
+	// B. Operator attempt -> 403 Forbidden (Destructive deletion is strictly Admin-only!)
+	reqOpDel := httptest.NewRequest(http.MethodDelete, "/api/v1/stacks/prod-minecraft", nil)
+	reqOpDel.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOpDel := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpDel, reqOpDel)
+	if wOpDel.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Operator stack delete, got %d", wOpDel.Code)
+	}
+
+	// C. Admin attempt via /api/v1/stacks/{name} -> 200 OK
+	reqAdminDel := httptest.NewRequest(http.MethodDelete, "/api/v1/stacks/prod-minecraft", nil)
+	reqAdminDel.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdminDel := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminDel, reqAdminDel)
+	if wAdminDel.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for Admin stack delete, got %d: %s", wAdminDel.Code, wAdminDel.Body.String())
+	}
+	if !deletedStacks["prod-minecraft"] {
+		t.Errorf("expected stack prod-minecraft to be deleted in Fenrir")
+	}
+
+	// D. Admin attempt via /api/v1/projects/{name} alias -> 200 OK
+	reqAdminProjDel := httptest.NewRequest(http.MethodDelete, "/api/v1/projects/valheim-srv", nil)
+	reqAdminProjDel.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdminProjDel := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminProjDel, reqAdminProjDel)
+	if wAdminProjDel.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for Admin project delete, got %d: %s", wAdminProjDel.Code, wAdminProjDel.Body.String())
+	}
+	if !deletedStacks["valheim-srv"] {
+		t.Errorf("expected stack valheim-srv to be deleted in Fenrir")
+	}
+
+	// --- 2. Stack Deletion via Web Form (POST /admin/stacks/action with action=delete) ---
+	// Operator attempt -> 403
+	formOp := url.Values{"name": {"valheim-srv"}, "action": {"delete"}}
+	reqOpForm := httptest.NewRequest(http.MethodPost, "/admin/stacks/action", strings.NewReader(formOp.Encode()))
+	reqOpForm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqOpForm.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOpForm := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpForm, reqOpForm)
+	if wOpForm.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Operator web delete action, got %d", wOpForm.Code)
+	}
+
+	// Admin attempt -> 303 redirect
+	formAdmin := url.Values{"name": {"valheim-srv"}, "action": {"delete"}}
+	reqAdminForm := httptest.NewRequest(http.MethodPost, "/admin/stacks/action", strings.NewReader(formAdmin.Encode()))
+	reqAdminForm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqAdminForm.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdminForm := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminForm, reqAdminForm)
+	if wAdminForm.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 Redirect for Admin web delete action, got %d", wAdminForm.Code)
+	}
+
+	// --- 3. Stack Provisioning (POST /api/v1/stacks & POST /api/v1/projects) ---
+	deployBody := `{"name":"new-game","compose":"services:\n  game:\n    image: game:latest\n"}`
+	// Operator attempt -> 403 Forbidden (Admin only)
+	reqOpDeploy := httptest.NewRequest(http.MethodPost, "/api/v1/stacks", strings.NewReader(deployBody))
+	reqOpDeploy.Header.Set("Content-Type", "application/json")
+	reqOpDeploy.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOpDeploy := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpDeploy, reqOpDeploy)
+	if wOpDeploy.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Operator stack deploy, got %d", wOpDeploy.Code)
+	}
+
+	// Admin attempt -> 202 Accepted
+	reqAdminDeploy := httptest.NewRequest(http.MethodPost, "/api/v1/stacks", strings.NewReader(deployBody))
+	reqAdminDeploy.Header.Set("Content-Type", "application/json")
+	reqAdminDeploy.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdminDeploy := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminDeploy, reqAdminDeploy)
+	if wAdminDeploy.Code != http.StatusAccepted {
+		t.Fatalf("expected 202 Accepted for Admin stack deploy, got %d: %s", wAdminDeploy.Code, wAdminDeploy.Body.String())
+	}
+	if deployedStacks["new-game"] == "" {
+		t.Errorf("expected stack new-game to be deployed")
+	}
+
+	// --- 4. Stack Operational Controls (POST /api/v1/stacks/{name}/restart & Web Form) ---
+	// Viewer attempt -> 403 Forbidden
+	reqViewerRestart := httptest.NewRequest(http.MethodPost, "/api/v1/stacks/prod-minecraft/restart", nil)
+	reqViewerRestart.Header.Set("X-Discord-User-ID", viewerUser.DiscordID)
+	wViewerRestart := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wViewerRestart, reqViewerRestart)
+	if wViewerRestart.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Viewer stack restart, got %d", wViewerRestart.Code)
+	}
+
+	// Operator attempt -> 200 OK (Operators are permitted)
+	reqOpRestart := httptest.NewRequest(http.MethodPost, "/api/v1/stacks/prod-minecraft/restart", nil)
+	reqOpRestart.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOpRestart := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpRestart, reqOpRestart)
+	if wOpRestart.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for Operator stack restart, got %d: %s", wOpRestart.Code, wOpRestart.Body.String())
+	}
+
+	// Operator web form action -> 303 Redirect
+	formOpRestart := url.Values{"name": {"prod-minecraft"}, "action": {"restart"}}
+	reqOpFormRestart := httptest.NewRequest(http.MethodPost, "/admin/stacks/action", strings.NewReader(formOpRestart.Encode()))
+	reqOpFormRestart.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqOpFormRestart.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+	wOpFormRestart := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wOpFormRestart, reqOpFormRestart)
+	if wOpFormRestart.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 Redirect for Operator web restart action, got %d", wOpFormRestart.Code)
+	}
+
+	// --- 5. Container Controls (POST /api/v1/containers/{name}/start, stop, restart) ---
+	// Viewer attempt -> 403 Forbidden
+	reqViewerContainer := httptest.NewRequest(http.MethodPost, "/api/v1/containers/mc-container/restart", nil)
+	reqViewerContainer.Header.Set("X-Discord-User-ID", viewerUser.DiscordID)
+	wViewerContainer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wViewerContainer, reqViewerContainer)
+	if wViewerContainer.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for Viewer container restart, got %d", wViewerContainer.Code)
+	}
+
+	// Operator attempt -> 200 OK (Operators are permitted)
+	for _, act := range []string{"start", "stop", "restart"} {
+		reqOpContainer := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/containers/mc-container/%s", act), nil)
+		reqOpContainer.Header.Set("X-Discord-User-ID", operatorUser.DiscordID)
+		wOpContainer := httptest.NewRecorder()
+		server.Handler().ServeHTTP(wOpContainer, reqOpContainer)
+		if wOpContainer.Code != http.StatusOK {
+			t.Errorf("expected 200 OK for Operator container %s, got %d: %s", act, wOpContainer.Code, wOpContainer.Body.String())
+		}
+		if containerActions["mc-container"] != act {
+			t.Errorf("expected container action %s in Fenrir, got %s", act, containerActions["mc-container"])
+		}
+	}
+
+	// Admin attempt -> 200 OK (Admins are permitted)
+	reqAdminContainer := httptest.NewRequest(http.MethodPost, "/api/v1/containers/mc-container/restart", nil)
+	reqAdminContainer.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
+	wAdminContainer := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdminContainer, reqAdminContainer)
+	if wAdminContainer.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for Admin container restart, got %d", wAdminContainer.Code)
+	}
+
+	// --- 6. Verify SQLite Audit Logs ---
+	logs, err := db.ListAuditLogs(ctx, 50)
+	if err != nil {
+		t.Fatalf("failed to list audit logs: %v", err)
+	}
+
+	foundUnauthorizedDelete := false
+	foundSuccessDelete := false
+	foundUnauthorizedDeploy := false
+	foundSuccessDeploy := false
+	foundOperatorContainerControl := false
+	foundOperatorStackControl := false
+	foundViewerUnauthorizedContainer := false
+
+	for _, l := range logs {
+		if l.Action == "stack_delete" && l.Status == "UNAUTHORIZED" && l.Username == operatorUser.Username {
+			foundUnauthorizedDelete = true
+		}
+		if l.Action == "stack_delete" && l.Status == "SUCCESS" && l.Username == adminUser.Username {
+			foundSuccessDelete = true
+		}
+		if l.Action == "stack_deploy" && l.Status == "UNAUTHORIZED" && l.Username == operatorUser.Username {
+			foundUnauthorizedDeploy = true
+		}
+		if l.Action == "stack_deploy" && l.Status == "SUCCESS" && l.Username == adminUser.Username {
+			foundSuccessDeploy = true
+		}
+		if strings.HasPrefix(l.Action, "container_") && l.Status == "SUCCESS" && l.Username == operatorUser.Username {
+			foundOperatorContainerControl = true
+		}
+		if strings.HasPrefix(l.Action, "server_") && l.Status == "SUCCESS" && l.Username == operatorUser.Username {
+			foundOperatorStackControl = true
+		}
+		if strings.HasPrefix(l.Action, "container_") && l.Status == "UNAUTHORIZED" && l.Username == viewerUser.Username {
+			foundViewerUnauthorizedContainer = true
+		}
+	}
+
+	if !foundUnauthorizedDelete {
+		t.Errorf("missing audit log for UNAUTHORIZED stack_delete by operator")
+	}
+	if !foundSuccessDelete {
+		t.Errorf("missing audit log for SUCCESS stack_delete by admin")
+	}
+	if !foundUnauthorizedDeploy {
+		t.Errorf("missing audit log for UNAUTHORIZED stack_deploy by operator")
+	}
+	if !foundSuccessDeploy {
+		t.Errorf("missing audit log for SUCCESS stack_deploy by admin")
+	}
+	if !foundOperatorContainerControl {
+		t.Errorf("missing audit log for SUCCESS container control by operator")
+	}
+	if !foundOperatorStackControl {
+		t.Errorf("missing audit log for SUCCESS stack control by operator")
+	}
+	if !foundViewerUnauthorizedContainer {
+		t.Errorf("missing audit log for UNAUTHORIZED container control by viewer")
+	}
+}

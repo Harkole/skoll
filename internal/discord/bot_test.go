@@ -269,18 +269,42 @@ func TestHandleStatusCommandSeparation(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status":         "healthy",
-				"version":        "2.5.0",
-				"uptime_seconds": 3665, // 1h 1m 5s
+				"status":        "healthy",
+				"version":       "2.5.0",
+				"uptimeSeconds": 3665.0, // 1h 1m 5s
+				"docker": map[string]any{
+					"connected": true,
+				},
+				"database": map[string]any{
+					"connected": true,
+				},
 			})
 		case "/api/v1/host":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"cpu_percent":       18.4,
-				"memory_percent":    52.5,
-				"memory_used_bytes": 4294967296, // 4 GB
-				"memory_total":      8589934592, // 8 GB
-				"load_average":      []float64{0.75, 0.65, 0.55},
-				"disk_percent":      33.0,
+				"data": map[string]any{
+					"host": map[string]any{
+						"uptimeSeconds": 3665,
+					},
+					"cpu": map[string]any{
+						"totalPercent": 18.4,
+					},
+					"memory": map[string]any{
+						"usedBytes":   4294967296, // 4 GB
+						"totalBytes":  8589934592, // 8 GB
+						"usedPercent": 52.5,
+					},
+					"load": map[string]any{
+						"load1":  0.75,
+						"load5":  0.65,
+						"load15": 0.55,
+					},
+					"disks": []map[string]any{
+						{
+							"mountPoint":  "/",
+							"usedPercent": 33.0,
+						},
+					},
+				},
 			})
 		case "/api/v1/projects":
 			// If /status mistakenly calls projects, return a dummy project to detect leak

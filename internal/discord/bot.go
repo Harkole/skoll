@@ -215,14 +215,12 @@ func (b *Bot) HandleStatusCommand(s *discordgo.Session, i *discordgo.Interaction
 
 	// Uptime calculation from host telemetry or health
 	uptimeStr := ""
-	if host != nil && host.UptimeFormatted != "" {
-		uptimeStr = host.UptimeFormatted
-	} else if host != nil && host.UptimeSeconds > 0 {
-		uptimeStr = formatUptime(host.UptimeSeconds)
+	if host != nil && host.Host.UptimeSeconds > 0 {
+		uptimeStr = formatUptime(host.Host.UptimeSeconds)
 	} else if health != nil && health.Uptime != "" {
 		uptimeStr = health.Uptime
 	} else if health != nil && health.UptimeSeconds > 0 {
-		uptimeStr = formatUptime(health.UptimeSeconds)
+		uptimeStr = formatUptime(uint64(health.UptimeSeconds))
 	}
 
 	if uptimeStr != "" {
@@ -237,16 +235,16 @@ func (b *Bot) HandleStatusCommand(s *discordgo.Session, i *discordgo.Interaction
 		// CPU Usage
 		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 			Name:   "CPU Usage",
-			Value:  fmt.Sprintf("%.1f%%", host.CPUPercent),
+			Value:  fmt.Sprintf("%.1f%%", host.CPU.TotalPercent),
 			Inline: true,
 		})
 
 		// RAM Usage
-		ramVal := fmt.Sprintf("%.1f%%", host.MemoryPercent)
-		if host.MemoryUsedBytes > 0 && host.MemoryTotal > 0 {
-			usedGB := float64(host.MemoryUsedBytes) / (1024 * 1024 * 1024)
-			totalGB := float64(host.MemoryTotal) / (1024 * 1024 * 1024)
-			ramVal = fmt.Sprintf("%.1f%% (%.2f / %.2f GB)", host.MemoryPercent, usedGB, totalGB)
+		ramVal := fmt.Sprintf("%.1f%%", host.Memory.UsedPercent)
+		if host.Memory.UsedBytes > 0 && host.Memory.TotalBytes > 0 {
+			usedGB := float64(host.Memory.UsedBytes) / (1024 * 1024 * 1024)
+			totalGB := float64(host.Memory.TotalBytes) / (1024 * 1024 * 1024)
+			ramVal = fmt.Sprintf("%.1f%% (%.2f / %.2f GB)", host.Memory.UsedPercent, usedGB, totalGB)
 		}
 		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 			Name:   "RAM Usage",
@@ -256,10 +254,8 @@ func (b *Bot) HandleStatusCommand(s *discordgo.Session, i *discordgo.Interaction
 
 		// Load Averages
 		loadStr := ""
-		if len(host.LoadAverage) >= 3 {
-			loadStr = fmt.Sprintf("%.2f, %.2f, %.2f", host.LoadAverage[0], host.LoadAverage[1], host.LoadAverage[2])
-		} else if host.Load1 > 0 || host.Load5 > 0 || host.Load15 > 0 {
-			loadStr = fmt.Sprintf("%.2f, %.2f, %.2f", host.Load1, host.Load5, host.Load15)
+		if host.Load != nil && (host.Load.Load1 > 0 || host.Load.Load5 > 0 || host.Load.Load15 > 0) {
+			loadStr = fmt.Sprintf("%.2f, %.2f, %.2f", host.Load.Load1, host.Load.Load5, host.Load.Load15)
 		}
 		if loadStr != "" {
 			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
@@ -270,10 +266,20 @@ func (b *Bot) HandleStatusCommand(s *discordgo.Session, i *discordgo.Interaction
 		}
 
 		// Disk Usage
-		if host.DiskPercent > 0 {
+		var diskPercent float64
+		for _, d := range host.Disks {
+			if d.MountPoint == "/" {
+				diskPercent = d.UsedPercent
+				break
+			}
+		}
+		if diskPercent == 0 && len(host.Disks) > 0 {
+			diskPercent = host.Disks[0].UsedPercent
+		}
+		if diskPercent > 0 {
 			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 				Name:   "Disk Usage",
-				Value:  fmt.Sprintf("%.1f%%", host.DiskPercent),
+				Value:  fmt.Sprintf("%.1f%%", diskPercent),
 				Inline: true,
 			})
 		}
@@ -425,9 +431,10 @@ func (b *Bot) HandleStackCommand(s *discordgo.Session, i *discordgo.InteractionC
 
 		var stackName, composeYAML string
 		for _, opt := range subCmd.Options {
-			if opt.Name == "name" {
+			switch opt.Name {
+			case "name":
 				stackName = strings.TrimSpace(opt.StringValue())
-			} else if opt.Name == "compose" {
+			case "compose":
 				composeYAML = opt.StringValue()
 			}
 		}

@@ -97,11 +97,15 @@ func TestFenrirClient(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"content": "server:\n  port: 25565\n",
 			})
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/metrics/host":
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/host":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"data": map[string]any{
-					"cpu_percent":    15.4,
-					"memory_percent": 42.1,
+					"cpu": map[string]any{
+						"totalPercent": 15.4,
+					},
+					"memory": map[string]any{
+						"usedPercent": 42.1,
+					},
 				},
 			})
 		default:
@@ -147,8 +151,8 @@ func TestFenrirClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected host metrics error: %v", err)
 	}
-	if metrics.CPUPercent != 15.4 {
-		t.Errorf("expected 15.4 cpu, got %f", metrics.CPUPercent)
+	if metrics.CPU.TotalPercent != 15.4 {
+		t.Errorf("expected 15.4 cpu, got %f", metrics.CPU.TotalPercent)
 	}
 
 	// 6. Get Project Compose
@@ -237,22 +241,54 @@ func TestFenrirHostAndHealthV1Endpoints(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/health":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status":         "healthy",
-				"version":        "2.4.0",
-				"uptime":         "3d 12h 45m",
-				"uptime_seconds": 305100,
+				"status":        "healthy",
+				"version":       "2.4.0",
+				"uptime":        "3d 12h 45m",
+				"uptimeSeconds": 305100.0,
+				"docker": map[string]any{
+					"connected": true,
+					"pingMs":    1.5,
+				},
+				"database": map[string]any{
+					"connected": true,
+					"path":      "fenrir.db",
+				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/host":
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"cpu_percent":       24.5,
-				"memory_percent":    68.2,
-				"memory_used_bytes": 10737418240, // 10 GB
-				"memory_total":      17179869184, // 16 GB
-				"disk_percent":      45.0,
-				"load_average":      []float64{1.25, 1.10, 0.95},
-				"uptime_seconds":    305100,
-				"hostname":          "fenrir-node-01",
-				"os":                "linux",
+				"data": map[string]any{
+					"timestamp": "2026-10-18T09:30:00Z",
+					"host": map[string]any{
+						"hostname":      "fenrir-node-01",
+						"os":            "linux",
+						"platform":      "ubuntu",
+						"uptimeSeconds": 305100,
+					},
+					"cpu": map[string]any{
+						"coresLogical":  16,
+						"coresPhysical": 8,
+						"totalPercent":  24.5,
+					},
+					"memory": map[string]any{
+						"totalBytes":  17179869184, // 16 GB
+						"usedBytes":   10737418240, // 10 GB
+						"usedPercent": 68.2,
+					},
+					"disks": []map[string]any{
+						{
+							"device":      "/dev/nvme0n1p2",
+							"mountPoint":  "/",
+							"totalBytes":  1000204886016,
+							"usedBytes":   450092198708,
+							"usedPercent": 45.0,
+						},
+					},
+					"load": map[string]any{
+						"load1":  1.25,
+						"load5":  1.10,
+						"load15": 0.95,
+					},
+				},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -278,14 +314,200 @@ func TestFenrirHostAndHealthV1Endpoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error from GetHost: %v", err)
 	}
-	if host.CPUPercent != 24.5 || host.MemoryPercent != 68.2 {
+	if host.CPU.TotalPercent != 24.5 || host.Memory.UsedPercent != 68.2 {
 		t.Errorf("unexpected cpu or memory: %+v", host)
 	}
-	if len(host.LoadAverage) != 3 || host.LoadAverage[0] != 1.25 {
-		t.Errorf("unexpected load average: %+v", host.LoadAverage)
+	if host.Load == nil || host.Load.Load1 != 1.25 {
+		t.Errorf("unexpected load average: %+v", host.Load)
 	}
-	if host.Hostname != "fenrir-node-01" || host.OS != "linux" {
+	if host.Host.Hostname != "fenrir-node-01" || host.Host.OS != "linux" {
 		t.Errorf("unexpected host metadata: %+v", host)
 	}
 }
+
+func TestFenrirRealPayloadStrictMapping(t *testing.T) {
+	// 1. Verbatim payload from Fenrir GET /api/v1/health
+	healthJSON := `{
+		"success": true,
+		"data": {
+			"status": "ok",
+			"version": "1.0.0",
+			"uptimeSeconds": 3600.5,
+			"docker": {
+				"connected": true,
+				"pingMs": 1.25
+			},
+			"database": {
+				"connected": true,
+				"path": "fenrir.db"
+			}
+		}
+	}`
+
+	var healthEnvelope struct {
+		Data HealthStatus `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(healthJSON), &healthEnvelope); err != nil {
+		t.Fatalf("failed to decode health payload: %v", err)
+	}
+	h := healthEnvelope.Data
+	if h.Status != "ok" || h.Version != "1.0.0" || h.UptimeSeconds != 3600.5 {
+		t.Errorf("unexpected health mapping: %+v", h)
+	}
+	if !h.Docker.Connected || h.Docker.PingMs != 1.25 {
+		t.Errorf("unexpected docker status mapping: %+v", h.Docker)
+	}
+	if !h.Database.Connected || h.Database.Path != "fenrir.db" {
+		t.Errorf("unexpected db status mapping: %+v", h.Database)
+	}
+
+	// 2. Verbatim payload from Fenrir GET /api/v1/host
+	hostJSON := `{
+		"success": true,
+		"data": {
+			"timestamp": "2026-10-18T09:30:00Z",
+			"host": {
+				"hostname": "fenrir-node-01",
+				"os": "linux",
+				"platform": "ubuntu",
+				"platformFamily": "debian",
+				"platformVersion": "24.04",
+				"kernelVersion": "6.8.0-40-generic",
+				"kernelArch": "x86_64",
+				"uptimeSeconds": 864000,
+				"bootTime": 1729200000,
+				"hostId": "a1b2c3d4-e5f6-7890-abcd-ef0123456789"
+			},
+			"cpu": {
+				"modelName": "AMD Ryzen 7 5700X 8-Core Processor",
+				"coresLogical": 16,
+				"coresPhysical": 8,
+				"totalPercent": 14.5,
+				"perCorePercent": [12.0, 15.2, 11.8, 18.1, 14.0, 13.5, 16.0, 15.4]
+			},
+			"memory": {
+				"totalBytes": 33614299136,
+				"availableBytes": 21474836480,
+				"usedBytes": 12139462656,
+				"usedPercent": 36.1,
+				"swapTotalBytes": 8589934592,
+				"swapUsedBytes": 0,
+				"swapFreeBytes": 8589934592,
+				"swapUsedPercent": 0.0
+			},
+			"disks": [
+				{
+					"device": "/dev/nvme0n1p2",
+					"mountPoint": "/",
+					"fsType": "ext4",
+					"totalBytes": 1000204886016,
+					"freeBytes": 650133176320,
+					"usedBytes": 350071709696,
+					"usedPercent": 35.0
+				}
+			],
+			"load": {
+				"load1": 0.45,
+				"load5": 0.52,
+				"load15": 0.48
+			}
+		}
+	}`
+
+	var hostEnvelope struct {
+		Data HostMetrics `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(hostJSON), &hostEnvelope); err != nil {
+		t.Fatalf("failed to decode host payload: %v", err)
+	}
+	host := hostEnvelope.Data
+	if host.CPU.TotalPercent != 14.5 || host.CPUPercent() != 14.5 {
+		t.Errorf("expected 14.5 CPU percent, got %f", host.CPU.TotalPercent)
+	}
+	if host.Memory.UsedPercent != 36.1 || host.MemoryPercent() != 36.1 {
+		t.Errorf("expected 36.1 Memory percent, got %f", host.Memory.UsedPercent)
+	}
+	if host.Memory.UsedBytes != 12139462656 || host.Memory.TotalBytes != 33614299136 {
+		t.Errorf("expected exact RAM byte counts, got used=%d total=%d", host.Memory.UsedBytes, host.Memory.TotalBytes)
+	}
+	if host.Host.Hostname != "fenrir-node-01" || host.Host.UptimeSeconds != 864000 {
+		t.Errorf("unexpected host metadata: %+v", host.Host)
+	}
+	if host.Load == nil || host.Load.Load1 != 0.45 || host.Load.Load5 != 0.52 || host.Load.Load15 != 0.48 {
+		t.Errorf("unexpected load metrics: %+v", host.Load)
+	}
+	if len(host.Disks) != 1 || host.Disks[0].UsedPercent != 35.0 || host.PrimaryDiskPercent() != 35.0 {
+		t.Errorf("unexpected disk metrics: %+v", host.Disks)
+	}
+
+	// 3. Verbatim payload from Fenrir GET /api/v1/projects
+	projectsJSON := `{
+		"success": true,
+		"data": [
+			{
+				"id": 1,
+				"name": "mc-survival",
+				"directoryPath": "/var/lib/fenrir/stacks/mc-survival",
+				"composeFile": "compose.yml",
+				"description": "PaperMC Survival Server",
+				"status": "running",
+				"createdAt": "2026-10-18T06:00:00Z",
+				"updatedAt": "2026-10-18T06:00:00Z"
+			}
+		]
+	}`
+
+	var projectsEnvelope struct {
+		Data []Project `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(projectsJSON), &projectsEnvelope); err != nil {
+		t.Fatalf("failed to decode projects payload: %v", err)
+	}
+	if len(projectsEnvelope.Data) != 1 {
+		t.Fatalf("expected 1 project, got %d", len(projectsEnvelope.Data))
+	}
+	p := projectsEnvelope.Data[0]
+	if p.ID != 1 || p.Name != "mc-survival" || p.DirectoryPath != "/var/lib/fenrir/stacks/mc-survival" || p.Status != "running" {
+		t.Errorf("unexpected project mapping: %+v", p)
+	}
+	if p.CreatedAt.IsZero() {
+		t.Errorf("expected non-zero CreatedAt timestamp")
+	}
+
+	// 4. Verbatim payload from Fenrir GET /api/v1/projects/{name}/status
+	statusJSON := `{
+		"success": true,
+		"data": {
+			"project": "mc-survival",
+			"status": "running",
+			"services": [
+				{
+					"id": "c1f2e3d4a5b6",
+					"name": "mc-survival-minecraft-1",
+					"service": "minecraft",
+					"state": "running",
+					"status": "Up 3 hours (healthy)",
+					"health": "healthy",
+					"publishers": "0.0.0.0:25565->25565/tcp"
+				}
+			]
+		}
+	}`
+
+	var statusEnvelope struct {
+		Data ProjectStatusResponse `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(statusJSON), &statusEnvelope); err != nil {
+		t.Fatalf("failed to decode project status payload: %v", err)
+	}
+	ps := statusEnvelope.Data
+	if ps.Project != "mc-survival" || ps.Status != "running" || len(ps.Services) != 1 {
+		t.Fatalf("unexpected project status response: %+v", ps)
+	}
+	svc := ps.Services[0]
+	if svc.ID != "c1f2e3d4a5b6" || svc.Name != "mc-survival-minecraft-1" || svc.Service != "minecraft" || svc.State != "running" || svc.Health != "healthy" {
+		t.Errorf("unexpected service status mapping: %+v", svc)
+	}
+}
+
 

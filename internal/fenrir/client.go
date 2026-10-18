@@ -153,8 +153,8 @@ func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
 }
 
 // GetProject returns details of a single stack.
-func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) {
-	var project Project
+func (c *Client) GetProject(ctx context.Context, name string) (*ProjectDetail, error) {
+	var project ProjectDetail
 	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s", name), nil, &project); err != nil {
 		return nil, err
 	}
@@ -162,12 +162,12 @@ func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) 
 }
 
 // GetProjectStatus queries real-time status of containers in a project.
-func (c *Client) GetProjectStatus(ctx context.Context, name string) (*Project, error) {
-	var project Project
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/status", name), nil, &project); err != nil {
+func (c *Client) GetProjectStatus(ctx context.Context, name string) (*ProjectStatusResponse, error) {
+	var status ProjectStatusResponse
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/status", name), nil, &status); err != nil {
 		return nil, err
 	}
-	return &project, nil
+	return &status, nil
 }
 
 // RestartProject signals Fenrir to restart containers in a project.
@@ -194,14 +194,10 @@ func (c *Client) DeployProject(ctx context.Context, name, composeYAML string) er
 	return c.do(ctx, http.MethodPost, "/api/v1/projects", req, nil)
 }
 
-// GetHost queries host telemetry and hardware metrics from Fenrir via GET /api/v1/host (with /api/v1/metrics/host fallback).
+// GetHost queries host telemetry and hardware metrics from Fenrir via GET /api/v1/host.
 func (c *Client) GetHost(ctx context.Context) (*HostMetrics, error) {
 	var metrics HostMetrics
 	if err := c.do(ctx, http.MethodGet, "/api/v1/host", nil, &metrics); err != nil {
-		// Fallback to /api/v1/metrics/host
-		if errFallback := c.do(ctx, http.MethodGet, "/api/v1/metrics/host", nil, &metrics); errFallback == nil {
-			return &metrics, nil
-		}
 		return nil, err
 	}
 	return &metrics, nil
@@ -259,6 +255,9 @@ func (c *Client) GetProjectCompose(ctx context.Context, name string) (string, er
 	// 2. Fallback: try GET /api/v1/projects/{name}
 	proj, err := c.GetProject(ctx, name)
 	if err == nil && proj != nil {
+		if proj.ComposeContent != "" {
+			return proj.ComposeContent, nil
+		}
 		if proj.Compose != "" {
 			return proj.Compose, nil
 		}
@@ -267,7 +266,7 @@ func (c *Client) GetProjectCompose(ctx context.Context, name string) (string, er
 		}
 		// 3. Fallback: Reconstruct YAML from services if available
 		if len(proj.Services) > 0 {
-			return ReconstructCompose(proj), nil
+			return ReconstructCompose(&proj.Project), nil
 		}
 	}
 

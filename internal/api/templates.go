@@ -1067,7 +1067,6 @@ var (
                             <td>
                                 <form method="POST" action="/admin/role" style="display: inline-flex; align-items: center;">
                                     <input type="hidden" name="user_id" value="{{.ID}}">
-                                    <input type="hidden" name="key" value="{{$.AdminKey}}">
                                     <select name="role">
                                         <option value="Admin" {{if eq .Role "Admin"}}selected{{end}}>Admin</option>
                                         <option value="Operator" {{if eq .Role "Operator"}}selected{{end}}>Operator</option>
@@ -1358,7 +1357,7 @@ var (
             const statusPill = document.getElementById('editorStatusText');
             if (statusPill) statusPill.textContent = 'Fetching...';
 
-            fetch('/admin/compose?name=' + encodeURIComponent(stackName) + '&key=' + encodeURIComponent('{{.AdminKey}}'))
+            fetch('/admin/compose?name=' + encodeURIComponent(stackName))
                 .then(r => {
                     if (!r.ok) throw new Error('HTTP ' + r.status);
                     return r.json();
@@ -1381,7 +1380,7 @@ var (
             if (statusPill) statusPill.textContent = 'Fetching ' + filename + '...';
             hideEditorAlert();
 
-            fetch('/admin/yaml?name=' + encodeURIComponent(currentStackName) + '&filename=' + encodeURIComponent(filename) + '&key=' + encodeURIComponent('{{.AdminKey}}'))
+            fetch('/admin/yaml?name=' + encodeURIComponent(currentStackName) + '&filename=' + encodeURIComponent(filename))
                 .then(r => {
                     if (r.status === 404) {
                         return { content: '# New configuration file: ' + filename + '\n' };
@@ -1419,8 +1418,7 @@ var (
             fetch('/api/v1/projects/' + encodeURIComponent(currentStackName) + '/compose?dry_run=true', {
                 method: 'PUT',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'X-Admin-Key': '{{.AdminKey}}'
+                    'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({ compose: yamlContent })
             })
@@ -1468,8 +1466,7 @@ var (
                 fetch(url, {
                     method: 'PUT',
                     headers: {
-                        'Content-Type': 'application/json',
-                        'X-Admin-Key': '{{.AdminKey}}'
+                        'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({ compose: yamlContent })
                 })
@@ -1504,8 +1501,7 @@ var (
                 fetch(url, {
                     method: 'PUT',
                     headers: {
-                        'Content-Type': 'application/json',
-                        'X-Admin-Key': '{{.AdminKey}}'
+                        'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({ content: yamlContent })
                 })

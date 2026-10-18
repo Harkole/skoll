@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,7 +40,7 @@ func NewServer(cfg *config.Config, db *database.DB, fenrirClient *fenrir.Client,
 
 	sessionSecret := cfg.SessionSecret
 	if sessionSecret == "" {
-		sessionSecret = cfg.DiscordClientSecret + ":" + cfg.AdminKey
+		sessionSecret = cfg.DiscordClientSecret
 	}
 
 	s := &Server{
@@ -359,54 +358,15 @@ func (s *Server) isRequestSecure(r *http.Request) bool {
 	return false
 }
 
-// verifyAdminAuth provides fallback verification for automated API/CLI tooling with AdminKey.
-func (s *Server) verifyAdminAuth(r *http.Request) bool {
-	if s.cfg.AdminKey == "" {
-		return false
-	}
-
-	// 1. Check Query parameter or Form Value
-	if key := r.FormValue("key"); key != "" {
-		if subtle.ConstantTimeCompare([]byte(key), []byte(s.cfg.AdminKey)) == 1 {
-			return true
-		}
-	}
-
-	// 2. Check X-Admin-Key header
-	if key := r.Header.Get("X-Admin-Key"); key != "" {
-		if subtle.ConstantTimeCompare([]byte(key), []byte(s.cfg.AdminKey)) == 1 {
-			return true
-		}
-	}
-
-	// 3. Check HTTP Basic Auth (username "admin", password = adminKey)
-	if _, pass, ok := r.BasicAuth(); ok {
-		if subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminKey)) == 1 {
-			return true
-		}
-	}
-
-	return false
-}
-
 // handleAdminDashboard renders the role management table and audit feed for Operator+ users.
 func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	user, err := s.getSessionUser(r)
 	if err != nil || user == nil {
-		// Fallback for automated test suites or CLI integrations using AdminKey
-		if s.verifyAdminAuth(r) {
-			user = &database.User{
-				DiscordID: "system_admin",
-				Username:  "administrator",
-				Role:      database.RoleAdmin,
-			}
-		} else {
-			// Unauthenticated -> redirect to clean login page with "Login with Discord" button
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
+		// Unauthenticated -> redirect to clean login page with "Login with Discord" button
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
 	}
 
 	// Verify that the logged-in user possesses the required Admin/Operator role
@@ -492,7 +452,6 @@ func (s *Server) handleAdminDashboard(w http.ResponseWriter, r *http.Request) {
 		"TotalStacks":        len(projects),
 		"RunningStacksCount": runningStacksCount,
 		"FenrirStatus":       fenrirStatus,
-		"AdminKey":           s.cfg.AdminKey,
 		"Notification":       r.URL.Query().Get("notification"),
 		"ActiveTab":          activeTab,
 	}
@@ -667,16 +626,10 @@ func (s *Server) respondForbidden(w http.ResponseWriter, r *http.Request, msg st
 // handleAdminStacksRedirect redirects /admin/stacks to /admin?tab=stacks.
 func (s *Server) handleAdminStacksRedirect(w http.ResponseWriter, r *http.Request) {
 	if user, err := s.getSessionUser(r); err != nil || user == nil {
-		if !s.verifyAdminAuth(r) {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
 	}
-	target := "/admin?tab=stacks"
-	if key := r.URL.Query().Get("key"); key != "" {
-		target += "&key=" + url.QueryEscape(key)
-	}
-	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	http.Redirect(w, r, "/admin?tab=stacks", http.StatusTemporaryRedirect)
 }
 
 // handleAdminGetCompose retrieves the compose YAML for a stack in JSON format for the admin modal.
@@ -830,16 +783,7 @@ func (s *Server) checkRequiredRole(w http.ResponseWriter, r *http.Request, requi
 		return user, true
 	}
 
-	// 3. Check Admin Secret credentials (for automated test harness / scripts)
-	if s.verifyAdminAuth(r) {
-		return &database.User{
-			DiscordID: "system_admin",
-			Username:  "administrator",
-			Role:      database.RoleAdmin,
-		}, true
-	}
-
-	// 4. Unauthorized
+	// 3. Unauthorized
 	_ = s.db.RecordAuditLog(ctx, "anonymous", "unlinked", action, target, "UNAUTHORIZED")
 	s.respondForbidden(w, r, fmt.Sprintf("forbidden: %s privileges required", requiredRole))
 	return nil, false
@@ -1481,16 +1425,10 @@ func (s *Server) handleAPIContainerAction(w http.ResponseWriter, r *http.Request
 // handleAdminArchivesRedirect redirects /admin/archives to /admin?tab=archives.
 func (s *Server) handleAdminArchivesRedirect(w http.ResponseWriter, r *http.Request) {
 	if user, err := s.getSessionUser(r); err != nil || user == nil {
-		if !s.verifyAdminAuth(r) {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
 	}
-	target := "/admin?tab=archives"
-	if key := r.URL.Query().Get("key"); key != "" {
-		target += "&key=" + url.QueryEscape(key)
-	}
-	http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	http.Redirect(w, r, "/admin?tab=archives", http.StatusTemporaryRedirect)
 }
 
 // handleAPIListArchives lists all archived stacks from Fenrir Daemon.

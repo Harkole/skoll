@@ -56,7 +56,6 @@ func setupTestAPIServer(t *testing.T) (*Server, *database.DB, *config.Config, *m
 	cfg := &config.Config{
 		Port:                ":8081",
 		PublicURL:           "http://localhost:8081",
-		AdminKey:            "super-secret-admin",
 		DatabasePath:        dbPath,
 		DiscordClientID:     "mock_client_id",
 		DiscordClientSecret: "mock_client_secret",
@@ -68,6 +67,22 @@ func setupTestAPIServer(t *testing.T) (*Server, *database.DB, *config.Config, *m
 	oauth := &mockOAuthExchanger{}
 	server := NewServer(cfg, db, nil, oauth)
 	return server, db, cfg, oauth
+}
+
+func createSessionCookie(t *testing.T, server *Server, user *database.User) *http.Cookie {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	if err := server.sessions.SetSessionCookie(rec, user, false); err != nil {
+		t.Fatalf("failed to create session cookie: %v", err)
+	}
+	cookies := rec.Result().Cookies()
+	for _, c := range cookies {
+		if c.Name == SessionCookieName {
+			return c
+		}
+	}
+	t.Fatalf("session cookie not found in recorder response")
+	return nil
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -362,15 +377,22 @@ func TestAdminStacksAndComposeViewer(t *testing.T) {
 	cfg := &config.Config{
 		Port:         ":8081",
 		PublicURL:    "http://localhost:8081",
-		AdminKey:     "admin-secret",
 		DatabasePath: dbPath,
 		HTTPTimeout:  5 * time.Second,
 	}
 
 	server := NewServer(cfg, db, fenrirClient, nil)
 
+	ctx := context.Background()
+	adminUser, err := db.UpsertUser(ctx, "discord_admin_stacks", "AdminStacks", database.RoleAdmin)
+	if err != nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
+	sessionCookie := createSessionCookie(t, server, adminUser)
+
 	// Test 1: Authenticated request to /admin with tab=stacks
-	req := httptest.NewRequest(http.MethodGet, "/admin?key=admin-secret&tab=stacks", nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin?tab=stacks", nil)
+	req.AddCookie(sessionCookie)
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
@@ -400,7 +422,8 @@ func TestAdminStacksAndComposeViewer(t *testing.T) {
 	}
 
 	// Test 2: Redirect /admin/stacks to /admin?tab=stacks
-	reqRedirect := httptest.NewRequest(http.MethodGet, "/admin/stacks?key=admin-secret", nil)
+	reqRedirect := httptest.NewRequest(http.MethodGet, "/admin/stacks", nil)
+	reqRedirect.AddCookie(sessionCookie)
 	wRedirect := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wRedirect, reqRedirect)
 
@@ -412,7 +435,8 @@ func TestAdminStacksAndComposeViewer(t *testing.T) {
 	}
 
 	// Test 3: AJAX /admin/compose?name=valheim-srv
-	reqCompose := httptest.NewRequest(http.MethodGet, "/admin/compose?name=valheim-srv&key=admin-secret", nil)
+	reqCompose := httptest.NewRequest(http.MethodGet, "/admin/compose?name=valheim-srv", nil)
+	reqCompose.AddCookie(sessionCookie)
 	wCompose := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wCompose, reqCompose)
 
@@ -425,7 +449,7 @@ func TestAdminStacksAndComposeViewer(t *testing.T) {
 
 	// Test 4: REST API /api/v1/stacks
 	reqAPIStacks := httptest.NewRequest(http.MethodGet, "/api/v1/stacks", nil)
-	reqAPIStacks.Header.Set("X-Admin-Key", "admin-secret")
+	reqAPIStacks.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
 	wAPIStacks := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wAPIStacks, reqAPIStacks)
 
@@ -438,7 +462,7 @@ func TestAdminStacksAndComposeViewer(t *testing.T) {
 
 	// Test 5: REST API /api/v1/stacks/{name}/compose
 	reqAPICompose := httptest.NewRequest(http.MethodGet, "/api/v1/stacks/valheim-srv/compose", nil)
-	reqAPICompose.Header.Set("X-Admin-Key", "admin-secret")
+	reqAPICompose.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
 	wAPICompose := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wAPICompose, reqAPICompose)
 
@@ -508,18 +532,24 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 	cfg := &config.Config{
 		Port:         ":8081",
 		PublicURL:    "http://localhost:8081",
-		AdminKey:     "secret-admin-key",
 		DatabasePath: dbPath,
 		HTTPTimeout:  5 * time.Second,
 	}
 
 	server := NewServer(cfg, db, fenrirClient, nil)
 
+	ctx := context.Background()
+	adminUser, err := db.UpsertUser(ctx, "discord_admin_editor", "AdminEditor", database.RoleAdmin)
+	if err != nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
+	sessionCookie := createSessionCookie(t, server, adminUser)
+
 	// 1. Raw YAML to PUT /api/v1/projects/{name}/compose
 	rawYAML := "version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft:latest\n"
 	reqRaw := httptest.NewRequest(http.MethodPut, "/api/v1/projects/minecraft-srv/compose?redeploy=false&dry_run=true", strings.NewReader(rawYAML))
 	reqRaw.Header.Set("Content-Type", "text/yaml")
-	reqRaw.Header.Set("X-Admin-Key", "secret-admin-key")
+	reqRaw.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
 	wRaw := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wRaw, reqRaw)
 
@@ -535,7 +565,7 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 		jsonPayload := fmt.Sprintf(`{"%s":"version: '3.8'\nservices:\n  mc:\n    image: itzg/minecraft\n"}`, key)
 		reqJSON := httptest.NewRequest(http.MethodPut, "/api/v1/stacks/minecraft-srv/compose", strings.NewReader(jsonPayload))
 		reqJSON.Header.Set("Content-Type", "application/json")
-		reqJSON.Header.Set("X-Admin-Key", "secret-admin-key")
+		reqJSON.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
 		wJSON := httptest.NewRecorder()
 		server.Handler().ServeHTTP(wJSON, reqJSON)
 
@@ -548,7 +578,7 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 	rawConfig := "server:\n  port: 25565\n"
 	reqYAML := httptest.NewRequest(http.MethodPut, "/api/v1/projects/minecraft-srv/yaml/config.yml?restart=true", strings.NewReader(rawConfig))
 	reqYAML.Header.Set("Content-Type", "text/yaml")
-	reqYAML.Header.Set("X-Admin-Key", "secret-admin-key")
+	reqYAML.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
 	wYAML := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wYAML, reqYAML)
 
@@ -561,7 +591,7 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 
 	// 4. Test auxiliary YAML fetch: GET /api/v1/projects/{name}/yaml/{filename}
 	reqGetYAML := httptest.NewRequest(http.MethodGet, "/api/v1/projects/minecraft-srv/yaml/config.yml", nil)
-	reqGetYAML.Header.Set("X-Admin-Key", "secret-admin-key")
+	reqGetYAML.Header.Set("X-Discord-User-ID", adminUser.DiscordID)
 	wGetYAML := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wGetYAML, reqGetYAML)
 
@@ -576,9 +606,9 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 	uiForm := url.Values{}
 	uiForm.Set("name", "minecraft-srv")
 	uiForm.Set("compose", rawYAML)
-	uiForm.Set("key", "secret-admin-key")
 	reqUICompose := httptest.NewRequest(http.MethodPost, "/admin/compose", strings.NewReader(uiForm.Encode()))
 	reqUICompose.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqUICompose.AddCookie(sessionCookie)
 	wUICompose := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wUICompose, reqUICompose)
 
@@ -587,7 +617,8 @@ func TestComposeAndYAMLEditingIntegration(t *testing.T) {
 	}
 
 	// 6. Test Admin UI endpoint GET /admin/yaml
-	reqAdminGetYAML := httptest.NewRequest(http.MethodGet, "/admin/yaml?name=minecraft-srv&filename=config.yml&key=secret-admin-key", nil)
+	reqAdminGetYAML := httptest.NewRequest(http.MethodGet, "/admin/yaml?name=minecraft-srv&filename=config.yml", nil)
+	reqAdminGetYAML.AddCookie(sessionCookie)
 	wAdminGetYAML := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wAdminGetYAML, reqAdminGetYAML)
 
@@ -634,7 +665,6 @@ func TestComposeAndYAMLRBACStrictAdminOnly(t *testing.T) {
 	cfg := &config.Config{
 		Port:         ":8081",
 		PublicURL:    "http://localhost:8081",
-		AdminKey:     "system-admin-secret",
 		DatabasePath: dbPath,
 		HTTPTimeout:  5 * time.Second,
 	}
@@ -731,15 +761,15 @@ func TestComposeAndYAMLRBACStrictAdminOnly(t *testing.T) {
 		t.Errorf("expected 200 OK for Admin user, got %d: %s", wAdmin.Code, wAdmin.Body.String())
 	}
 
-	// 9. Admin via X-Admin-Key -> 200 OK
+	// 9. Legacy static admin key must be strictly rejected with 403 Forbidden
 	reqAdminKey := httptest.NewRequest(http.MethodPut, "/api/v1/projects/my-app/compose", strings.NewReader(validYAML))
 	reqAdminKey.Header.Set("Content-Type", "text/yaml")
 	reqAdminKey.Header.Set("X-Admin-Key", "system-admin-secret")
 	wAdminKey := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wAdminKey, reqAdminKey)
 
-	if wAdminKey.Code != http.StatusOK {
-		t.Errorf("expected 200 OK for AdminKey auth, got %d: %s", wAdminKey.Code, wAdminKey.Body.String())
+	if wAdminKey.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for legacy X-Admin-Key auth, got %d: %s", wAdminKey.Code, wAdminKey.Body.String())
 	}
 
 	// 10. Verify Audit Log was recorded
@@ -1320,7 +1350,6 @@ func TestDestructiveAndControlEndpointsStrictAdminRBAC(t *testing.T) {
 	cfg := &config.Config{
 		Port:         ":8081",
 		PublicURL:    "http://localhost:8081",
-		AdminKey:     "master-admin-secret",
 		DatabasePath: dbPath,
 		HTTPTimeout:  5 * time.Second,
 	}
@@ -1583,15 +1612,33 @@ func TestAdminDashboardArchives(t *testing.T) {
 	cfg := &config.Config{
 		Port:         ":8081",
 		PublicURL:    "http://localhost:8081",
-		AdminKey:     "admin-secret",
 		DatabasePath: dbPath,
 		HTTPTimeout:  5 * time.Second,
 	}
 
 	server := NewServer(cfg, db, fenrirClient, nil)
 
-	// 1. Verify /admin/archives redirects to /admin?tab=archives
-	reqRedir := httptest.NewRequest(http.MethodGet, "/admin/archives?key=admin-secret", nil)
+	ctx := context.Background()
+	adminUser, err := db.UpsertUser(ctx, "discord_admin_archive", "AdminArchive", database.RoleAdmin)
+	if err != nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
+	sessionCookie := createSessionCookie(t, server, adminUser)
+
+	// 0. Verify unauthenticated access to /admin/archives redirects to /login
+	reqUnauth := httptest.NewRequest(http.MethodGet, "/admin/archives", nil)
+	wUnauth := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wUnauth, reqUnauth)
+	if wUnauth.Code != http.StatusSeeOther && wUnauth.Code != http.StatusFound && wUnauth.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("expected redirect for unauthenticated request, got %d", wUnauth.Code)
+	}
+	if loc := wUnauth.Header().Get("Location"); loc != "/login" {
+		t.Errorf("expected redirect to /login, got %s", loc)
+	}
+
+	// 1. Verify /admin/archives redirects to /admin?tab=archives for authenticated session
+	reqRedir := httptest.NewRequest(http.MethodGet, "/admin/archives", nil)
+	reqRedir.AddCookie(sessionCookie)
 	wRedir := httptest.NewRecorder()
 	server.Handler().ServeHTTP(wRedir, reqRedir)
 	if wRedir.Code != http.StatusTemporaryRedirect {
@@ -1601,8 +1648,9 @@ func TestAdminDashboardArchives(t *testing.T) {
 		t.Errorf("expected location to contain tab=archives, got %s", loc)
 	}
 
-	// 2. Fetch /admin dashboard with tab=archives
-	req := httptest.NewRequest(http.MethodGet, "/admin?key=admin-secret&tab=archives", nil)
+	// 2. Fetch /admin dashboard with tab=archives using session cookie
+	req := httptest.NewRequest(http.MethodGet, "/admin?tab=archives", nil)
+	req.AddCookie(sessionCookie)
 	w := httptest.NewRecorder()
 	server.Handler().ServeHTTP(w, req)
 
@@ -1709,7 +1757,6 @@ func TestAPIArchivesEndpoints(t *testing.T) {
 	cfg := &config.Config{
 		Port:         ":8081",
 		PublicURL:    "http://localhost:8081",
-		AdminKey:     "admin-secret",
 		DatabasePath: dbPath,
 		HTTPTimeout:  5 * time.Second,
 	}
@@ -1865,6 +1912,131 @@ func TestAPIArchivesEndpoints(t *testing.T) {
 	}
 	if !foundPurge {
 		t.Errorf("expected audit log for archive_purge")
+	}
+}
+
+func TestSecurityStaticAdminKeyCompleteRemoval(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_security_cleanup.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	fenrirServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+	}))
+	defer fenrirServer.Close()
+
+	fenrirClient := fenrir.NewClient(fenrirServer.URL, "test-fenrir-key", 5*time.Second)
+
+	cfg := &config.Config{
+		Port:         ":8081",
+		PublicURL:    "http://localhost:8081",
+		DatabasePath: dbPath,
+		HTTPTimeout:  5 * time.Second,
+	}
+
+	server := NewServer(cfg, db, fenrirClient, nil)
+
+	legacyKey := "legacy-admin-key-attempt"
+
+	// 1. UI endpoints attempting to use ?key= must either redirect to /login or be forbidden (no session)
+	uiPageEndpoints := []string{
+		"/admin?key=" + legacyKey,
+		"/admin?tab=stacks&key=" + legacyKey,
+		"/admin?tab=archives&key=" + legacyKey,
+		"/admin/stacks?key=" + legacyKey,
+		"/admin/archives?key=" + legacyKey,
+	}
+
+	for _, ep := range uiPageEndpoints {
+		req := httptest.NewRequest(http.MethodGet, ep, nil)
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusSeeOther && w.Code != http.StatusFound && w.Code != http.StatusTemporaryRedirect {
+			t.Errorf("expected redirect to /login for UI endpoint %s, got %d", ep, w.Code)
+		}
+		if loc := w.Header().Get("Location"); loc != "/login" {
+			t.Errorf("expected redirect to /login for UI endpoint %s, got: %s", ep, loc)
+		}
+	}
+
+	uiAjaxEndpoints := []string{
+		"/admin/compose?name=my-app&key=" + legacyKey,
+		"/admin/yaml?name=my-app&filename=config.yml&key=" + legacyKey,
+	}
+
+	for _, ep := range uiAjaxEndpoints {
+		req := httptest.NewRequest(http.MethodGet, ep, nil)
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for AJAX endpoint %s with legacy key, got %d", ep, w.Code)
+		}
+	}
+
+	// 2. Protected REST endpoints using X-Admin-Key must be rejected with 403 Forbidden
+	restEndpoints := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/api/v1/stacks", ""},
+		{http.MethodGet, "/api/v1/users", ""},
+		{http.MethodGet, "/api/v1/audit-logs", ""},
+		{http.MethodGet, "/api/v1/archives", ""},
+		{http.MethodPut, "/api/v1/projects/my-app/compose", "version: '3.8'\nservices:\n  app:\n    image: nginx\n"},
+		{http.MethodDelete, "/api/v1/stacks/my-app", ""},
+		{http.MethodPost, "/api/v1/archives/123/restore", ""},
+		{http.MethodDelete, "/api/v1/archives/123", ""},
+		{http.MethodPost, "/api/v1/stacks/my-app/restart", ""},
+	}
+
+	for _, tc := range restEndpoints {
+		// A: Attempt via X-Admin-Key header
+		var bodyReader io.Reader
+		if tc.body != "" {
+			bodyReader = strings.NewReader(tc.body)
+		}
+		reqHeader := httptest.NewRequest(tc.method, tc.path, bodyReader)
+		if tc.body != "" {
+			reqHeader.Header.Set("Content-Type", "text/yaml")
+		}
+		reqHeader.Header.Set("X-Admin-Key", legacyKey)
+		wHeader := httptest.NewRecorder()
+		server.Handler().ServeHTTP(wHeader, reqHeader)
+
+		if wHeader.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for X-Admin-Key on %s %s, got %d: %s", tc.method, tc.path, wHeader.Code, wHeader.Body.String())
+		}
+
+		// B: Attempt via ?key= query parameter
+		delim := "?"
+		if strings.Contains(tc.path, "?") {
+			delim = "&"
+		}
+		reqQuery := httptest.NewRequest(tc.method, tc.path+delim+"key="+legacyKey, nil)
+		wQuery := httptest.NewRecorder()
+		server.Handler().ServeHTTP(wQuery, reqQuery)
+
+		if wQuery.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for ?key= on %s %s, got %d: %s", tc.method, tc.path, wQuery.Code, wQuery.Body.String())
+		}
+
+		// C: Attempt via HTTP Basic Auth
+		reqBasic := httptest.NewRequest(tc.method, tc.path, nil)
+		reqBasic.SetBasicAuth("admin", legacyKey)
+		wBasic := httptest.NewRecorder()
+		server.Handler().ServeHTTP(wBasic, reqBasic)
+
+		if wBasic.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for Basic Auth on %s %s, got %d: %s", tc.method, tc.path, wBasic.Code, wBasic.Body.String())
+		}
 	}
 }
 

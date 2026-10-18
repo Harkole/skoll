@@ -248,6 +248,101 @@ func TestInteractionDeferralAndEdit(t *testing.T) {
 	}
 }
 
+func TestRegisterApplicationCommandsFullPayloadIntegrity(t *testing.T) {
+	var createdCommands []discordgo.ApplicationCommand
+	var requestPaths []string
+
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("failed to create discordgo session: %v", err)
+	}
+
+	session.Client = &http.Client{
+		Transport: &interceptingTransport{
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				requestPaths = append(requestPaths, r.URL.Path)
+				var cmd discordgo.ApplicationCommand
+				body, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(body, &cmd)
+				cmd.ID = "cmd_" + cmd.Name
+				createdCommands = append(createdCommands, cmd)
+
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(cmd)
+			},
+		},
+	}
+
+	bot := &Bot{
+		Session: session,
+		cfg:     &config.Config{DiscordClientID: "test_app_123"},
+	}
+
+	// 1. Test Global Registration (guildID == "")
+	registered, err := bot.RegisterApplicationCommands("test_app_123", "")
+	if err != nil {
+		t.Fatalf("RegisterApplicationCommands failed: %v", err)
+	}
+	if len(registered) != 4 {
+		t.Fatalf("expected 4 root commands registered, got %d", len(registered))
+	}
+
+	for _, p := range requestPaths {
+		if !strings.Contains(p, "/applications/test_app_123/commands") || strings.Contains(p, "guilds") {
+			t.Errorf("expected global command path, got %s", p)
+		}
+	}
+
+	// Verify /stack payload structure sent to Discord
+	var stackCmd *discordgo.ApplicationCommand
+	for _, c := range createdCommands {
+		if c.Name == "stack" {
+			stackCmd = &c
+			break
+		}
+	}
+	if stackCmd == nil {
+		t.Fatalf("missing /stack in registered commands")
+	}
+
+	subMap := make(map[string]*discordgo.ApplicationCommandOption)
+	for _, opt := range stackCmd.Options {
+		subMap[opt.Name] = opt
+	}
+
+	for _, sub := range []string{"deploy", "list", "delete"} {
+		if _, ok := subMap[sub]; !ok {
+			t.Errorf("missing /stack %s subcommand in Discord registration payload", sub)
+		}
+	}
+
+	// Verify /stack delete option integrity
+	delOpt := subMap["delete"]
+	if delOpt.Type != discordgo.ApplicationCommandOptionSubCommand {
+		t.Errorf("expected /stack delete to be SubCommand, got %v", delOpt.Type)
+	}
+	if len(delOpt.Options) == 0 || delOpt.Options[0].Name != "name" || !delOpt.Options[0].Required {
+		t.Errorf("expected /stack delete to require 'name' option: %+v", delOpt.Options)
+	}
+
+	// 2. Test Guild-Scoped Registration (guildID == "guild_456")
+	requestPaths = nil
+	createdCommands = nil
+	registeredGuild, err := bot.RegisterApplicationCommands("test_app_123", "guild_456")
+	if err != nil {
+		t.Fatalf("guild RegisterApplicationCommands failed: %v", err)
+	}
+	if len(registeredGuild) != 4 {
+		t.Fatalf("expected 4 root commands for guild, got %d", len(registeredGuild))
+	}
+	for _, p := range requestPaths {
+		if !strings.Contains(p, "/applications/test_app_123/guilds/guild_456/commands") {
+			t.Errorf("expected guild command path with guild_456, got %s", p)
+		}
+	}
+}
+
 func TestHandleStatusCommandSeparation(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_status_cmd.db")
@@ -570,3 +665,340 @@ func TestHandleStackListCommand(t *testing.T) {
 	}
 }
 
+func TestHandleStackDeleteCommand(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_stack_delete.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	adminUser, _ := db.UpsertUser(ctx, "discord_admin", "AdminBob", database.RoleAdmin)
+	operatorUser, _ := db.UpsertUser(ctx, "discord_op", "OperatorAlice", database.RoleOperator)
+
+	deleted := false
+	mockFenrir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/valheim-server" {
+			deleted = true
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"message": "deleted"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockFenrir.Close()
+
+	fenrirClient := fenrir.NewClient(mockFenrir.URL, "secret", 5*time.Second)
+	bot := &Bot{
+		cfg:          &config.Config{DiscordBotToken: "test-token", PublicURL: "http://localhost:8081"},
+		db:           db,
+		fenrirClient: fenrirClient,
+	}
+
+	var interceptedBody []byte
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	session.Client = &http.Client{
+		Transport: &interceptingTransport{
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				interceptedBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			},
+		},
+	}
+
+	// 1. Operator attempt -> Unauthorized (Admin required)
+	opInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "interaction_stack_del_op",
+			Token: "token_stack_del_op",
+			Type:  discordgo.InteractionApplicationCommand,
+			Member: &discordgo.Member{
+				User: &discordgo.User{ID: operatorUser.DiscordID, Username: operatorUser.Username},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name: "stack",
+				Options: []*discordgo.ApplicationCommandInteractionDataOption{
+					{
+						Name: "delete",
+						Options: []*discordgo.ApplicationCommandInteractionDataOption{
+							{Name: "name", Value: "valheim-server", Type: discordgo.ApplicationCommandOptionString},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	bot.HandleStackCommand(session, opInteraction)
+
+	var opResp struct {
+		Data struct {
+			Embeds []*discordgo.MessageEmbed `json:"embeds"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(interceptedBody, &opResp)
+	if len(opResp.Data.Embeds) == 0 || !strings.Contains(opResp.Data.Embeds[0].Title, "Permission Denied") {
+		t.Errorf("expected Permission Denied for operator /stack delete, got %+v", opResp.Data.Embeds)
+	}
+	if deleted {
+		t.Errorf("stack should NOT have been deleted by operator")
+	}
+
+	// 2. Admin attempt -> Success
+	adminInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "interaction_stack_del_admin",
+			Token: "token_stack_del_admin",
+			Type:  discordgo.InteractionApplicationCommand,
+			Member: &discordgo.Member{
+				User: &discordgo.User{ID: adminUser.DiscordID, Username: adminUser.Username},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name: "stack",
+				Options: []*discordgo.ApplicationCommandInteractionDataOption{
+					{
+						Name: "delete",
+						Options: []*discordgo.ApplicationCommandInteractionDataOption{
+							{Name: "name", Value: "valheim-server", Type: discordgo.ApplicationCommandOptionString},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	bot.HandleStackCommand(session, adminInteraction)
+
+	var adminResp struct {
+		Embeds []*discordgo.MessageEmbed `json:"embeds"`
+	}
+	_ = json.Unmarshal(interceptedBody, &adminResp)
+	if len(adminResp.Embeds) == 0 || !strings.Contains(adminResp.Embeds[0].Title, "Stack Torn Down") {
+		t.Errorf("expected Stack Torn Down for admin /stack delete, got: %s", string(interceptedBody))
+	}
+	if !deleted {
+		t.Errorf("expected stack to be deleted in Fenrir by admin")
+	}
+
+	// Check audit log
+	logs, err := db.ListAuditLogs(ctx, 10)
+	if err != nil || len(logs) < 2 {
+		t.Fatalf("expected audit logs for stack delete attempts")
+	}
+	// Most recent log should be SUCCESS by admin
+	if logs[0].Action != "stack_delete" || logs[0].Status != "SUCCESS" || logs[0].Username != adminUser.Username {
+		t.Errorf("unexpected most recent audit log: %+v", logs[0])
+	}
+	// Previous log should be UNAUTHORIZED by operator
+	if logs[1].Action != "stack_delete" || logs[1].Status != "UNAUTHORIZED" || logs[1].Username != operatorUser.Username {
+		t.Errorf("unexpected operator audit log: %+v", logs[1])
+	}
+}
+
+func TestDiscordRoleBasedPrivilegesAlignment(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "test_discord_privileges.db")
+	db, err := database.Open(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	adminUser, _ := db.UpsertUser(ctx, "discord_admin", "AdminBob", database.RoleAdmin)
+	operatorUser, _ := db.UpsertUser(ctx, "discord_op", "OperatorAlice", database.RoleOperator)
+	viewerUser, _ := db.UpsertUser(ctx, "discord_viewer", "ViewerCharlie", database.RoleViewer)
+
+	restarted := false
+	deployed := false
+	mockFenrir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/valheim-server/restart" {
+			restarted = true
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "restarted"})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects" {
+			deployed = true
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "accepted"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockFenrir.Close()
+
+	fenrirClient := fenrir.NewClient(mockFenrir.URL, "secret", 5*time.Second)
+	bot := &Bot{
+		cfg:          &config.Config{DiscordBotToken: "test-token", PublicURL: "http://localhost:8081"},
+		db:           db,
+		fenrirClient: fenrirClient,
+	}
+
+	var interceptedBody []byte
+	session, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	session.Client = &http.Client{
+		Transport: &interceptingTransport{
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				interceptedBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{}`))
+			},
+		},
+	}
+
+	// 1. /server restart: Viewer attempt -> Permission Denied
+	viewerRestartInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "i_srv_viewer",
+			Token: "t_srv_viewer",
+			Type:  discordgo.InteractionApplicationCommand,
+			Member: &discordgo.Member{
+				User: &discordgo.User{ID: viewerUser.DiscordID, Username: viewerUser.Username},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name: "server",
+				Options: []*discordgo.ApplicationCommandInteractionDataOption{
+					{
+						Name: "restart",
+						Options: []*discordgo.ApplicationCommandInteractionDataOption{
+							{Name: "name", Value: "valheim-server", Type: discordgo.ApplicationCommandOptionString},
+						},
+					},
+				},
+			},
+		},
+	}
+	bot.HandleServerCommand(session, viewerRestartInteraction)
+	var viewerResp struct {
+		Data struct {
+			Embeds []*discordgo.MessageEmbed `json:"embeds"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(interceptedBody, &viewerResp)
+	if len(viewerResp.Data.Embeds) == 0 || !strings.Contains(viewerResp.Data.Embeds[0].Title, "Permission Denied") {
+		t.Errorf("expected Permission Denied for viewer /server restart, got: %s", string(interceptedBody))
+	}
+	if restarted {
+		t.Errorf("stack should not have restarted for viewer")
+	}
+
+	// 2. /server restart: Operator attempt -> Success
+	opRestartInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "i_srv_op",
+			Token: "t_srv_op",
+			Type:  discordgo.InteractionApplicationCommand,
+			Member: &discordgo.Member{
+				User: &discordgo.User{ID: operatorUser.DiscordID, Username: operatorUser.Username},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name: "server",
+				Options: []*discordgo.ApplicationCommandInteractionDataOption{
+					{
+						Name: "restart",
+						Options: []*discordgo.ApplicationCommandInteractionDataOption{
+							{Name: "name", Value: "valheim-server", Type: discordgo.ApplicationCommandOptionString},
+						},
+					},
+				},
+			},
+		},
+	}
+	bot.HandleServerCommand(session, opRestartInteraction)
+	var opResp struct {
+		Embeds []*discordgo.MessageEmbed `json:"embeds"`
+	}
+	_ = json.Unmarshal(interceptedBody, &opResp)
+	if len(opResp.Embeds) == 0 || !strings.Contains(opResp.Embeds[0].Title, "Restarted") {
+		t.Errorf("expected Restarted for operator /server restart, got: %s", string(interceptedBody))
+	}
+	if !restarted {
+		t.Errorf("expected stack to be restarted by operator")
+	}
+
+	// 3. /stack deploy: Operator attempt -> Permission Denied
+	opDeployInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "i_dep_op",
+			Token: "t_dep_op",
+			Type:  discordgo.InteractionApplicationCommand,
+			Member: &discordgo.Member{
+				User: &discordgo.User{ID: operatorUser.DiscordID, Username: operatorUser.Username},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name: "stack",
+				Options: []*discordgo.ApplicationCommandInteractionDataOption{
+					{
+						Name: "deploy",
+						Options: []*discordgo.ApplicationCommandInteractionDataOption{
+							{Name: "name", Value: "valheim-server", Type: discordgo.ApplicationCommandOptionString},
+							{Name: "compose", Value: "services:\n  valheim:\n    image: valheim:latest", Type: discordgo.ApplicationCommandOptionString},
+						},
+					},
+				},
+			},
+		},
+	}
+	bot.HandleStackCommand(session, opDeployInteraction)
+	var opDeployResp struct {
+		Data struct {
+			Embeds []*discordgo.MessageEmbed `json:"embeds"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(interceptedBody, &opDeployResp)
+	if len(opDeployResp.Data.Embeds) == 0 || !strings.Contains(opDeployResp.Data.Embeds[0].Title, "Permission Denied") {
+		t.Errorf("expected Permission Denied for operator /stack deploy, got: %s", string(interceptedBody))
+	}
+	if deployed {
+		t.Errorf("stack should not have deployed for operator")
+	}
+
+	// 4. /stack deploy: Admin attempt -> Success
+	adminDeployInteraction := &discordgo.InteractionCreate{
+		Interaction: &discordgo.Interaction{
+			ID:    "i_dep_admin",
+			Token: "t_dep_admin",
+			Type:  discordgo.InteractionApplicationCommand,
+			Member: &discordgo.Member{
+				User: &discordgo.User{ID: adminUser.DiscordID, Username: adminUser.Username},
+			},
+			Data: discordgo.ApplicationCommandInteractionData{
+				Name: "stack",
+				Options: []*discordgo.ApplicationCommandInteractionDataOption{
+					{
+						Name: "deploy",
+						Options: []*discordgo.ApplicationCommandInteractionDataOption{
+							{Name: "name", Value: "valheim-server", Type: discordgo.ApplicationCommandOptionString},
+							{Name: "compose", Value: "services:\n  valheim:\n    image: valheim:latest", Type: discordgo.ApplicationCommandOptionString},
+						},
+					},
+				},
+			},
+		},
+	}
+	bot.HandleStackCommand(session, adminDeployInteraction)
+	var adminDeployResp struct {
+		Embeds []*discordgo.MessageEmbed `json:"embeds"`
+	}
+	_ = json.Unmarshal(interceptedBody, &adminDeployResp)
+	if len(adminDeployResp.Embeds) == 0 || !strings.Contains(adminDeployResp.Embeds[0].Title, "Deployed") {
+		t.Errorf("expected Deployed for admin /stack deploy, got: %s", string(interceptedBody))
+	}
+	if !deployed {
+		t.Errorf("expected stack to be deployed by admin")
+	}
+}

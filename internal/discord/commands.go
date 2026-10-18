@@ -85,6 +85,19 @@ var Commands = []*discordgo.ApplicationCommand{
 				Description: "List all deployed stacks and their runtime states",
 				Type:        discordgo.ApplicationCommandOptionSubCommand,
 			},
+			{
+				Name:        "delete",
+				Description: "Tear down and archive a Docker Compose stack (Admin only)",
+				Type:        discordgo.ApplicationCommandOptionSubCommand,
+				Options: []*discordgo.ApplicationCommandOption{
+					{
+						Type:        discordgo.ApplicationCommandOptionString,
+						Name:        "name",
+						Description: "Target stack name to tear down and archive",
+						Required:    true,
+					},
+				},
+			},
 		},
 	},
 }

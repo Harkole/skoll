@@ -55,6 +55,48 @@ func NewBot(cfg *config.Config, db *database.DB, fenrirClient *fenrir.Client) (*
 	return bot, nil
 }
 
+// RegisterApplicationCommands registers all root application slash commands and their nested subcommands with Discord.
+func (b *Bot) RegisterApplicationCommands(appID, guildID string) ([]*discordgo.ApplicationCommand, error) {
+	if appID == "" {
+		return nil, fmt.Errorf("missing discord application ID")
+	}
+
+	totalSubcommands := 0
+	for _, cmd := range Commands {
+		totalSubcommands += len(cmd.Options)
+	}
+
+	scope := "globally"
+	if guildID != "" {
+		scope = fmt.Sprintf("for guild %s (instant sync)", guildID)
+	}
+
+	log.Printf("[Discord] Synchronizing %d root slash commands (%d nested subcommands) %s for AppID %s...",
+		len(Commands), totalSubcommands, scope, appID)
+
+	var registered []*discordgo.ApplicationCommand
+	for _, cmd := range Commands {
+		created, err := b.Session.ApplicationCommandCreate(appID, guildID, cmd)
+		if err != nil {
+			log.Printf("[Discord] Warning: failed to register slash command /%s: %v", cmd.Name, err)
+			continue
+		}
+		registered = append(registered, created)
+
+		if len(cmd.Options) > 0 {
+			subNames := make([]string, 0, len(cmd.Options))
+			for _, opt := range cmd.Options {
+				subNames = append(subNames, opt.Name)
+			}
+			log.Printf("[Discord]  -> Registered root command /%s with subcommands: [%s]", cmd.Name, strings.Join(subNames, ", "))
+		} else {
+			log.Printf("[Discord]  -> Registered root command /%s", cmd.Name)
+		}
+	}
+
+	return registered, nil
+}
+
 // Start opens the Discord websocket connection and registers application slash commands.
 func (b *Bot) Start() error {
 	log.Println("[Discord] Opening connection to Discord Gateway...")
@@ -67,14 +109,12 @@ func (b *Bot) Start() error {
 		appID = b.Session.State.User.ID
 	}
 
-	log.Printf("[Discord] Registering %d application slash commands for AppID %s...", len(Commands), appID)
-	for _, cmd := range Commands {
-		created, err := b.Session.ApplicationCommandCreate(appID, "", cmd)
-		if err != nil {
-			log.Printf("[Discord] Warning: failed to register slash command /%s: %v", cmd.Name, err)
-		} else {
-			b.registered = append(b.registered, created)
-		}
+	guildID := strings.TrimSpace(b.cfg.DiscordGuildID)
+	registered, err := b.RegisterApplicationCommands(appID, guildID)
+	if err != nil {
+		log.Printf("[Discord] Warning: command registration failed: %v", err)
+	} else {
+		b.registered = append(b.registered, registered...)
 	}
 
 	return nil
@@ -529,6 +569,55 @@ func (b *Bot) HandleStackCommand(s *discordgo.Session, i *discordgo.InteractionC
 			Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		}
 		_ = ReplyEmbed(s, i, embed)
+
+	case "delete":
+		// Deletion strictly requires Administrator privileges
+		dbUser, err := Authorize(ctx, b.db, u.ID, database.RoleAdmin)
+		if err != nil {
+			b.respondRBACError(s, i, u, "stack_delete", "unknown", database.RoleAdmin, err)
+			return
+		}
+
+		var stackName string
+		for _, opt := range subCmd.Options {
+			if opt.Name == "name" {
+				stackName = strings.TrimSpace(opt.StringValue())
+			}
+		}
+
+		if stackName == "" {
+			_ = ReplyEphemeral(s, i, "Target stack `name` is required.")
+			return
+		}
+
+		if b.fenrirClient == nil {
+			_ = ReplyEphemeral(s, i, "Fenrir Daemon client is not configured.")
+			return
+		}
+
+		if err := DeferResponse(s, i); err != nil {
+			log.Printf("[Discord] Warning: failed to defer interaction for /stack delete: %v", err)
+		}
+
+		if err := b.fenrirClient.DeleteProject(ctx, stackName); err != nil {
+			_ = b.db.RecordAuditLog(ctx, dbUser.DiscordID, dbUser.Username, "stack_delete", stackName, "FAILED")
+			embed := &discordgo.MessageEmbed{
+				Title:       "❌ Teardown Failed",
+				Description: fmt.Sprintf("Fenrir rejected stack teardown for `%s`:\n\n```%s```", stackName, err.Error()),
+				Color:       0xef4444,
+			}
+			_ = EditResponseEmbed(s, i, embed)
+			return
+		}
+
+		_ = b.db.RecordAuditLog(ctx, dbUser.DiscordID, dbUser.Username, "stack_delete", stackName, "SUCCESS")
+		embed := &discordgo.MessageEmbed{
+			Title:       "🗑️ Stack Torn Down & Archived",
+			Description: fmt.Sprintf("Docker Compose stack `%s` was successfully stopped, released host ports, and archived in Fenrir Daemon.\nAction performed by Administrator <@%s>", stackName, u.ID),
+			Color:       0xef4444,
+			Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		}
+		_ = EditResponseEmbed(s, i, embed)
 	}
 }
 

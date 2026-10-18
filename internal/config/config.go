@@ -11,9 +11,8 @@ import (
 // Config holds all runtime configurations for Sköll.
 type Config struct {
 	// Server settings
-	Port        string // e.g. "8081" or ":8081"
-	PublicURL   string // Base URL for OAuth redirects, e.g. "http://localhost:8081"
-	AdminKey    string // Secret token for fallback Admin UI access
+	Port         string // e.g. "8081" or ":8081"
+	PublicURL    string // Base URL for OAuth redirects, e.g. "http://localhost:8081"
 	DatabasePath string // Path to SQLite database file
 
 	// Discord Bot & OAuth2 credentials
@@ -44,7 +43,6 @@ func Load() (*Config, error) {
 
 	dbPath := getEnv("SKOLL_DB_PATH", "skoll.db")
 	publicURL := strings.TrimRight(getEnv("SKOLL_PUBLIC_URL", "http://localhost"+port), "/")
-	adminKey := getEnv("SKOLL_ADMIN_KEY", "skoll-admin-secret")
 
 	botToken := getEnv("DISCORD_BOT_TOKEN", "")
 	clientID := getEnv("DISCORD_CLIENT_ID", "")
@@ -53,7 +51,10 @@ func Load() (*Config, error) {
 
 	sessionSecret := getEnv("SKOLL_SESSION_SECRET", "")
 	if sessionSecret == "" {
-		sessionSecret = clientSecret + ":" + adminKey
+		sessionSecret = clientSecret
+	}
+	if sessionSecret == "" {
+		sessionSecret = "skoll-default-session-encryption-secret-key"
 	}
 
 	fenrirURL := strings.TrimRight(getEnv("FENRIR_API_URL", "http://localhost:8080"), "/")
@@ -66,7 +67,6 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port:                port,
 		PublicURL:           publicURL,
-		AdminKey:            adminKey,
 		DatabasePath:        dbPath,
 		DiscordBotToken:     botToken,
 		DiscordClientID:     clientID,

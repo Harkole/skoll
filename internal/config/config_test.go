@@ -9,7 +9,7 @@ import (
 func TestConfigDefaults(t *testing.T) {
 	// Clear relevant env vars
 	keys := []string{
-		"SKOLL_PORT", "SKOLL_DB_PATH", "SKOLL_PUBLIC_URL", "SKOLL_ADMIN_KEY",
+		"SKOLL_PORT", "SKOLL_DB_PATH", "SKOLL_PUBLIC_URL",
 		"DISCORD_BOT_TOKEN", "DISCORD_CLIENT_ID", "DISCORD_CLIENT_SECRET",
 		"DISCORD_REDIRECT_URI", "DISCORD_GUILD_ID", "FENRIR_API_URL", "FENRIR_API_KEY",
 	}

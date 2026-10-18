@@ -20,3 +20,4 @@ bin/
 Thumbs.db
 .idea/
 .vscode/
+deploy.ps1

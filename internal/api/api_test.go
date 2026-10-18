@@ -2040,3 +2040,110 @@ func TestSecurityStaticAdminKeyCompleteRemoval(t *testing.T) {
 	}
 }
 
+func TestTermsOfServiceAndPrivacyPolicyEndpoints(t *testing.T) {
+	server, db, _, _ := setupTestAPIServer(t)
+
+	// 1. Verify GET /tos (Terms of Service) is publicly accessible without authentication
+	reqTOS := httptest.NewRequest(http.MethodGet, "/tos", nil)
+	wTOS := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wTOS, reqTOS)
+
+	if wTOS.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /tos, got %d", wTOS.Code)
+	}
+	if ct := wTOS.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("expected Content-Type text/html for /tos, got %s", ct)
+	}
+	bodyTOS := wTOS.Body.String()
+	for _, expectedSubstring := range []string{
+		"Terms of Service",
+		"Self-Hosted Deployment",
+		"Provided \"As-Is\"",
+		"Discord Authentication",
+		"Role-Based Access Control",
+		"audit trail",
+		"/privacy",
+	} {
+		if !strings.Contains(bodyTOS, expectedSubstring) {
+			t.Errorf("expected /tos to contain %q, but was missing", expectedSubstring)
+		}
+	}
+
+	// 2. Verify GET /terms alias resolves to Terms of Service
+	reqTerms := httptest.NewRequest(http.MethodGet, "/terms", nil)
+	wTerms := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wTerms, reqTerms)
+
+	if wTerms.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /terms alias, got %d", wTerms.Code)
+	}
+	if !strings.Contains(wTerms.Body.String(), "Terms of Service") {
+		t.Errorf("expected /terms to serve Terms of Service page")
+	}
+
+	// 3. Verify GET /privacy (Privacy Policy) is publicly accessible without authentication
+	reqPrivacy := httptest.NewRequest(http.MethodGet, "/privacy", nil)
+	wPrivacy := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wPrivacy, reqPrivacy)
+
+	if wPrivacy.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /privacy, got %d", wPrivacy.Code)
+	}
+	if ct := wPrivacy.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Errorf("expected Content-Type text/html for /privacy, got %s", ct)
+	}
+	bodyPrivacy := wPrivacy.Body.String()
+	for _, expectedSubstring := range []string{
+		"Privacy Policy",
+		"Zero Third-Party Sharing",
+		"100% Local SQLite",
+		"audit_logs",
+		"Discord",
+		"/tos",
+	} {
+		if !strings.Contains(bodyPrivacy, expectedSubstring) {
+			t.Errorf("expected /privacy to contain %q, but was missing", expectedSubstring)
+		}
+	}
+
+	// 4. Verify /login template contains links to /tos and /privacy
+	reqLogin := httptest.NewRequest(http.MethodGet, "/login", nil)
+	wLogin := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wLogin, reqLogin)
+	if wLogin.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /login, got %d", wLogin.Code)
+	}
+	bodyLogin := wLogin.Body.String()
+	if !strings.Contains(bodyLogin, `href="/tos"`) {
+		t.Errorf("expected /login to contain link to /tos")
+	}
+	if !strings.Contains(bodyLogin, `href="/privacy"`) {
+		t.Errorf("expected /login to contain link to /privacy")
+	}
+
+	// 5. Verify /admin dashboard contains footer links to /tos and /privacy
+	ctx := context.Background()
+	adminUser, err := db.UpsertUser(ctx, "discord_admin_legal", "AdminLegal", database.RoleAdmin)
+	if err != nil {
+		t.Fatalf("failed to create admin user: %v", err)
+	}
+	sessionCookie := createSessionCookie(t, server, adminUser)
+
+	reqAdmin := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	reqAdmin.AddCookie(sessionCookie)
+	wAdmin := httptest.NewRecorder()
+	server.Handler().ServeHTTP(wAdmin, reqAdmin)
+
+	if wAdmin.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for /admin, got %d", wAdmin.Code)
+	}
+	bodyAdmin := wAdmin.Body.String()
+	if !strings.Contains(bodyAdmin, `href="/tos"`) {
+		t.Errorf("expected /admin to contain footer link to /tos")
+	}
+	if !strings.Contains(bodyAdmin, `href="/privacy"`) {
+		t.Errorf("expected /admin to contain footer link to /privacy")
+	}
+}
+
+

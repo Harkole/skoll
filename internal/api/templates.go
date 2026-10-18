@@ -1127,6 +1127,17 @@ var (
                 </table>
             </div>
         </div>
+
+        <!-- Dashboard Footer -->
+        <footer style="margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--text-secondary); flex-wrap: wrap; gap: 12px;">
+            <div>
+                <span>Sköll Admin Companion</span> &bull; <span>Self-Hosted &amp; Private</span>
+            </div>
+            <div style="display: flex; gap: 16px;">
+                <a href="/tos" style="color: var(--text-secondary); text-decoration: none;" onmouseover="this.style.color='var(--accent-blue)'" onmouseout="this.style.color='var(--text-secondary)'">Terms of Service</a>
+                <a href="/privacy" style="color: var(--text-secondary); text-decoration: none;" onmouseover="this.style.color='var(--accent-blue)'" onmouseout="this.style.color='var(--text-secondary)'">Privacy Policy</a>
+            </div>
+        </footer>
     </div>
 
     <!-- Compose & Configuration YAML Editor Modal -->
@@ -1725,6 +1736,26 @@ var (
             margin-bottom: 20px;
             text-align: left;
         }
+        .login-footer {
+            margin-top: 24px;
+            padding-top: 18px;
+            border-top: 1px solid rgba(35, 45, 63, 0.6);
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+        }
+        .login-footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: color 0.15s ease;
+        }
+        .login-footer a:hover {
+            color: var(--accent-cyan);
+            text-decoration: underline;
+        }
     </style>
 </head>
 <body>
@@ -1748,6 +1779,12 @@ var (
 
         <div class="badge-notice">
             <strong>Access Requirements:</strong> Operator or Admin role required. The first linked Discord user is automatically granted Administrator privileges.
+        </div>
+
+        <div class="login-footer">
+            <a href="/tos">Terms of Service</a>
+            <span>&bull;</span>
+            <a href="/privacy">Privacy Policy</a>
         </div>
     </div>
 </body>
@@ -1854,6 +1891,924 @@ var (
             <a href="/auth/logout" class="btn">Log Out</a>
             <a href="/auth/login" class="btn btn-primary">Switch Discord Account</a>
         </div>
+    </div>
+</body>
+</html>`))
+
+	tosTemplate = template.Must(template.New("tos").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terms of Service - Sköll</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f17;
+            --surface-color: #121824;
+            --surface-border: #232d3f;
+            --surface-card: #161f30;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-cyan: #38bdf8;
+            --accent-blue: #3b82f6;
+            --accent-green: #3fb950;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+            --discord-blurple: #5865F2;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            line-height: 1.65;
+            padding: 40px 20px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            max-width: 860px;
+            width: 100%;
+        }
+        .nav-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--surface-border);
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-primary);
+        }
+        .logo-symbol {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #0284c7, #6366f1);
+            border-radius: 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 20px;
+            color: white;
+            box-shadow: 0 0 15px rgba(2, 132, 199, 0.4);
+        }
+        .brand-title {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+        .brand-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .nav-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .btn-nav {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-ghost {
+            background: rgba(30, 41, 59, 0.5);
+            color: var(--text-secondary);
+            border: 1px solid var(--surface-border);
+        }
+        .btn-ghost:hover {
+            background: rgba(30, 41, 59, 0.9);
+            color: var(--text-primary);
+            border-color: var(--accent-cyan);
+        }
+        .btn-primary {
+            background: var(--discord-blurple);
+            color: white;
+            border: 1px solid transparent;
+        }
+        .btn-primary:hover {
+            background: #4752C4;
+        }
+        .doc-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            background: var(--surface-color);
+            padding: 6px;
+            border-radius: 10px;
+            border: 1px solid var(--surface-border);
+            width: fit-content;
+        }
+        .doc-tab {
+            padding: 8px 20px;
+            border-radius: 7px;
+            font-size: 13px;
+            font-weight: 600;
+            text-decoration: none;
+            color: var(--text-secondary);
+            transition: all 0.15s ease;
+        }
+        .doc-tab:hover {
+            color: var(--text-primary);
+        }
+        .doc-tab.active {
+            background: var(--surface-card);
+            color: var(--accent-cyan);
+            border: 1px solid var(--surface-border);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        .legal-card {
+            background: var(--surface-color);
+            border: 1px solid var(--surface-border);
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+        }
+        .doc-header {
+            margin-bottom: 32px;
+            border-bottom: 1px solid var(--surface-border);
+            padding-bottom: 24px;
+        }
+        .doc-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: rgba(56, 189, 248, 0.12);
+            color: var(--accent-cyan);
+            border: 1px solid rgba(56, 189, 248, 0.3);
+            margin-bottom: 12px;
+        }
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+        }
+        .meta-info {
+            font-size: 13px;
+            color: var(--text-secondary);
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .highlights-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin-bottom: 36px;
+        }
+        .highlight-item {
+            background: var(--surface-card);
+            border: 1px solid var(--surface-border);
+            border-radius: 10px;
+            padding: 16px;
+        }
+        .highlight-icon {
+            font-size: 20px;
+            margin-bottom: 8px;
+        }
+        .highlight-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+        .highlight-desc {
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .section {
+            margin-bottom: 32px;
+        }
+        h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        p {
+            color: #cbd5e1;
+            font-size: 14px;
+            margin-bottom: 14px;
+            line-height: 1.7;
+        }
+        ul {
+            list-style: none;
+            margin-bottom: 14px;
+            padding-left: 0;
+        }
+        li {
+            position: relative;
+            padding-left: 20px;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #cbd5e1;
+            line-height: 1.6;
+        }
+        li::before {
+            content: "•";
+            position: absolute;
+            left: 6px;
+            color: var(--accent-cyan);
+            font-weight: bold;
+        }
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            background: #0f1522;
+            border: 1px solid #1e293b;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: var(--accent-cyan);
+        }
+        .callout-box {
+            padding: 16px 18px;
+            border-radius: 10px;
+            background: rgba(245, 158, 11, 0.08);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            margin: 20px 0;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #fde68a;
+        }
+        .callout-box strong {
+            color: #fbbf24;
+        }
+        .callout-box.info {
+            background: rgba(56, 189, 248, 0.08);
+            border-color: rgba(56, 189, 248, 0.3);
+            color: #bae6fd;
+        }
+        .callout-box.info strong {
+            color: var(--accent-cyan);
+        }
+        .page-footer {
+            margin-top: 32px;
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+        .page-footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin: 0 8px;
+        }
+        .page-footer a:hover {
+            color: var(--accent-cyan);
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Top Navigation -->
+        <header class="nav-header">
+            <a href="/login" class="brand">
+                <div class="logo-symbol">S</div>
+                <div>
+                    <div class="brand-title">Sköll</div>
+                    <div class="brand-subtitle">Docker Administration Companion</div>
+                </div>
+            </a>
+            <div class="nav-actions">
+                <a href="/login" class="btn-nav btn-ghost">← Login</a>
+                <a href="/admin" class="btn-nav btn-primary">Control Panel</a>
+            </div>
+        </header>
+
+        <!-- Document Switcher -->
+        <div class="doc-tabs">
+            <a href="/tos" class="doc-tab active">Terms of Service</a>
+            <a href="/privacy" class="doc-tab">Privacy Policy</a>
+        </div>
+
+        <!-- Main Document -->
+        <main class="legal-card">
+            <div class="doc-header">
+                <span class="doc-badge">Self-Hosted Deployment</span>
+                <h1>Terms of Service</h1>
+                <div class="meta-info">
+                    <span>Effective: October 2026</span>
+                    <span>&bull;</span>
+                    <span>Applies to: Sköll Bot Gateway &amp; Control Panel</span>
+                </div>
+            </div>
+
+            <!-- Key Highlights Grid -->
+            <div class="highlights-grid">
+                <div class="highlight-item">
+                    <div class="highlight-icon">🛠️</div>
+                    <div class="highlight-title">Self-Hosted Software</div>
+                    <div class="highlight-desc">Sköll is deployed locally on private infrastructure under the server administrator's exclusive custody.</div>
+                </div>
+                <div class="highlight-item">
+                    <div class="highlight-icon">⚖️</div>
+                    <div class="highlight-title">Provided "As-Is"</div>
+                    <div class="highlight-desc">The software is distributed without warranties of merchantability, uptime, or fitness for a particular purpose.</div>
+                </div>
+                <div class="highlight-item">
+                    <div class="highlight-icon">🔑</div>
+                    <div class="highlight-title">Discord Authentication</div>
+                    <div class="highlight-desc">Access relies strictly on verified Discord OAuth sessions and local Role-Based Access Control (RBAC).</div>
+                </div>
+                <div class="highlight-item">
+                    <div class="highlight-icon">🛡️</div>
+                    <div class="highlight-title">Admin Responsibility</div>
+                    <div class="highlight-desc">Operators are solely responsible for actions executed against connected Docker daemons and containers.</div>
+                </div>
+            </div>
+
+            <!-- Section 1 -->
+            <div class="section">
+                <h2>1. Acceptance of Terms</h2>
+                <p>
+                    By connecting to, accessing, or utilizing this deployment of Sköll (including its Discord slash command interface and web-based administration control panel), you acknowledge that you have read, understood, and agreed to be bound by these Terms of Service. If you do not agree to these terms, you must refrain from using the software.
+                </p>
+            </div>
+
+            <!-- Section 2 -->
+            <div class="section">
+                <h2>2. Software Nature &amp; "As-Is" Warranty Disclaimer</h2>
+                <p>
+                    Sköll is an open-source, self-hosted companion and management gateway for Docker Compose stacks and the Fenrir daemon. The software is provided on an <strong>"AS-IS"</strong> and <strong>"AS-AVAILABLE"</strong> basis without warranties of any kind, whether express, statutory, or implied.
+                </p>
+                <div class="callout-box">
+                    <strong>Limitation of Liability:</strong> Under no circumstances shall the software authors, maintainers, contributors, or instance operators be liable for any direct, indirect, incidental, special, exemplary, or consequential damages (including, but not limited to, loss of data, corrupted container volumes, service interruptions, server downtime, or hardware malfunction) arising in any way out of the installation, use, or modification of Sköll.
+                </div>
+                <p>
+                    You assume full responsibility and risk for inspecting Compose files, executing restarts, applying configuration edits, restoring or purging backups, and monitoring container workloads.
+                </p>
+            </div>
+
+            <!-- Section 3 -->
+            <div class="section">
+                <h2>3. Authorized Administrative Use &amp; Role-Based Access Control</h2>
+                <p>
+                    Sköll is designed exclusively for authorized system administrators and operators. Access to administrative capabilities is governed by local Role-Based Access Control (RBAC) stored in an internal SQLite database:
+                </p>
+                <ul>
+                    <li><strong>Admin:</strong> Unrestricted access to deploy stacks, edit <code>compose.yml</code> and auxiliary configuration YAML, purge/restore archived stacks, and manage user roles.</li>
+                    <li><strong>Operator:</strong> Access to view stacks, inspect logs, trigger container lifecycle actions (start, stop, restart), and view archives.</li>
+                    <li><strong>Viewer / Unlinked:</strong> Read-only or unprivileged state with no execution rights.</li>
+                </ul>
+                <p>
+                    Users agree not to tamper with, circumvent, or exploit authentication mechanisms, session cookies, or endpoint guards to gain unauthorized administrative privileges.
+                </p>
+            </div>
+
+            <!-- Section 4 -->
+            <div class="section">
+                <h2>4. Discord Account &amp; Credential Security</h2>
+                <p>
+                    Sköll does not use static admin master keys, shared passwords, or backdoor credentials. All access is authenticated through Discord OAuth2 (via the <code>identify</code> scope) and validated against local role assignments.
+                </p>
+                <ul>
+                    <li>Users are solely responsible for securing their Discord accounts, including maintaining strong passwords and enabling Multi-Factor Authentication (2FA).</li>
+                    <li>Any administrative command or configuration modification executed through a linked Discord identity will be attributed to that account in the local audit trail.</li>
+                    <li>If you suspect your Discord account has been compromised, notify your instance administrator immediately to demote or revoke your linked role.</li>
+                </ul>
+            </div>
+
+            <!-- Section 5 -->
+            <div class="section">
+                <h2>5. Container Operations &amp; Data Responsibility</h2>
+                <p>
+                    Operations triggered via Sköll (such as stack redeployments, live YAML editing, and stack deletion) directly alter the state of host containers and storage volumes. You acknowledge that:
+                </p>
+                <ul>
+                    <li>Stack deployments and dry-run validations are advisory and do not substitute for rigorous container testing.</li>
+                    <li>Archive purging (<code>DELETE /api/v1/archives/{id}</code>) is a permanent, irreversible action that irreversibly destroys the target stack backup.</li>
+                    <li>Administrators must maintain independent, external backups of critical data before executing destructive operations.</li>
+                </ul>
+            </div>
+
+            <!-- Section 6 -->
+            <div class="section">
+                <h2>6. Instance Governance &amp; Termination</h2>
+                <p>
+                    Because Sköll is self-hosted, the host administrator of this deployment retains complete autonomy over instance availability, network access, role assignments, and data retention. The administrator may modify permissions, revoke linked accounts, or discontinue the service at any time without prior notice.
+                </p>
+            </div>
+
+            <!-- Section 7 -->
+            <div class="section">
+                <h2>7. Inquiries &amp; Self-Host Contact</h2>
+                <p>
+                    For inquiries regarding the policies, permissions, or operations of this specific deployment, please contact the system administrator operating this server instance.
+                </p>
+            </div>
+        </main>
+
+        <!-- Page Footer -->
+        <footer class="page-footer">
+            <div>
+                <a href="/tos">Terms of Service</a> &bull;
+                <a href="/privacy">Privacy Policy</a> &bull;
+                <a href="/login">Discord Login</a> &bull;
+                <a href="/admin">Dashboard</a>
+            </div>
+            <div style="margin-top: 8px;">
+                Sköll &bull; Open-Source &amp; Self-Hosted &bull; Connected to Fenrir Daemon
+            </div>
+        </footer>
+    </div>
+</body>
+</html>`))
+
+	privacyTemplate = template.Must(template.New("privacy").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - Sköll</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f17;
+            --surface-color: #121824;
+            --surface-border: #232d3f;
+            --surface-card: #161f30;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-cyan: #38bdf8;
+            --accent-blue: #3b82f6;
+            --accent-green: #3fb950;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+            --discord-blurple: #5865F2;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            line-height: 1.65;
+            padding: 40px 20px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .container {
+            max-width: 860px;
+            width: 100%;
+        }
+        .nav-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid var(--surface-border);
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: var(--text-primary);
+        }
+        .logo-symbol {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #0284c7, #6366f1);
+            border-radius: 10px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 20px;
+            color: white;
+            box-shadow: 0 0 15px rgba(2, 132, 199, 0.4);
+        }
+        .brand-title {
+            font-size: 18px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+        .brand-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .nav-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .btn-nav {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 500;
+            text-decoration: none;
+            transition: all 0.15s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-ghost {
+            background: rgba(30, 41, 59, 0.5);
+            color: var(--text-secondary);
+            border: 1px solid var(--surface-border);
+        }
+        .btn-ghost:hover {
+            background: rgba(30, 41, 59, 0.9);
+            color: var(--text-primary);
+            border-color: var(--accent-cyan);
+        }
+        .btn-primary {
+            background: var(--discord-blurple);
+            color: white;
+            border: 1px solid transparent;
+        }
+        .btn-primary:hover {
+            background: #4752C4;
+        }
+        .doc-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            background: var(--surface-color);
+            padding: 6px;
+            border-radius: 10px;
+            border: 1px solid var(--surface-border);
+            width: fit-content;
+        }
+        .doc-tab {
+            padding: 8px 20px;
+            border-radius: 7px;
+            font-size: 13px;
+            font-weight: 600;
+            text-decoration: none;
+            color: var(--text-secondary);
+            transition: all 0.15s ease;
+        }
+        .doc-tab:hover {
+            color: var(--text-primary);
+        }
+        .doc-tab.active {
+            background: var(--surface-card);
+            color: var(--accent-cyan);
+            border: 1px solid var(--surface-border);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        .legal-card {
+            background: var(--surface-color);
+            border: 1px solid var(--surface-border);
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+        }
+        .doc-header {
+            margin-bottom: 32px;
+            border-bottom: 1px solid var(--surface-border);
+            padding-bottom: 24px;
+        }
+        .doc-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            background: rgba(63, 185, 80, 0.12);
+            color: var(--accent-green);
+            border: 1px solid rgba(63, 185, 80, 0.3);
+            margin-bottom: 12px;
+        }
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 8px;
+        }
+        .meta-info {
+            font-size: 13px;
+            color: var(--text-secondary);
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+        .highlights-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin-bottom: 36px;
+        }
+        .highlight-item {
+            background: var(--surface-card);
+            border: 1px solid var(--surface-border);
+            border-radius: 10px;
+            padding: 16px;
+        }
+        .highlight-icon {
+            font-size: 20px;
+            margin-bottom: 8px;
+        }
+        .highlight-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+        .highlight-desc {
+            font-size: 12px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+        .section {
+            margin-bottom: 32px;
+        }
+        h2 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        p {
+            color: #cbd5e1;
+            font-size: 14px;
+            margin-bottom: 14px;
+            line-height: 1.7;
+        }
+        ul {
+            list-style: none;
+            margin-bottom: 14px;
+            padding-left: 0;
+        }
+        li {
+            position: relative;
+            padding-left: 20px;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #cbd5e1;
+            line-height: 1.6;
+        }
+        li::before {
+            content: "•";
+            position: absolute;
+            left: 6px;
+            color: var(--accent-green);
+            font-weight: bold;
+        }
+        code {
+            font-family: 'JetBrains Mono', monospace;
+            background: #0f1522;
+            border: 1px solid #1e293b;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: var(--accent-cyan);
+        }
+        .callout-box {
+            padding: 16px 18px;
+            border-radius: 10px;
+            background: rgba(63, 185, 80, 0.08);
+            border: 1px solid rgba(63, 185, 80, 0.3);
+            margin: 20px 0;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #bbf7d0;
+        }
+        .callout-box strong {
+            color: var(--accent-green);
+        }
+        .callout-box.info {
+            background: rgba(56, 189, 248, 0.08);
+            border-color: rgba(56, 189, 248, 0.3);
+            color: #bae6fd;
+        }
+        .callout-box.info strong {
+            color: var(--accent-cyan);
+        }
+        .page-footer {
+            margin-top: 32px;
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.7;
+        }
+        .page-footer a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            margin: 0 8px;
+        }
+        .page-footer a:hover {
+            color: var(--accent-cyan);
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Top Navigation -->
+        <header class="nav-header">
+            <a href="/login" class="brand">
+                <div class="logo-symbol">S</div>
+                <div>
+                    <div class="brand-title">Sköll</div>
+                    <div class="brand-subtitle">Docker Administration Companion</div>
+                </div>
+            </a>
+            <div class="nav-actions">
+                <a href="/login" class="btn-nav btn-ghost">← Login</a>
+                <a href="/admin" class="btn-nav btn-primary">Control Panel</a>
+            </div>
+        </header>
+
+        <!-- Document Switcher -->
+        <div class="doc-tabs">
+            <a href="/tos" class="doc-tab">Terms of Service</a>
+            <a href="/privacy" class="doc-tab active">Privacy Policy</a>
+        </div>
+
+        <!-- Main Document -->
+        <main class="legal-card">
+            <div class="doc-header">
+                <span class="doc-badge">Privacy First &bull; Zero Telemetry</span>
+                <h1>Privacy Policy</h1>
+                <div class="meta-info">
+                    <span>Effective: October 2026</span>
+                    <span>&bull;</span>
+                    <span>Applies to: Sköll Bot Gateway &amp; Control Panel</span>
+                </div>
+            </div>
+
+            <!-- Key Highlights Grid -->
+            <div class="highlights-grid">
+                <div class="highlight-item">
+                    <div class="highlight-icon">🔒</div>
+                    <div class="highlight-title">Zero Third-Party Sharing</div>
+                    <div class="highlight-desc">No data is ever sold, rented, or transmitted to third parties, external analytics, or advertisers.</div>
+                </div>
+                <div class="highlight-item">
+                    <div class="highlight-icon">🗄️</div>
+                    <div class="highlight-title">100% Local SQLite</div>
+                    <div class="highlight-desc">All user mappings and audit logs reside strictly on this local host machine in an embedded database.</div>
+                </div>
+                <div class="highlight-item">
+                    <div class="highlight-icon">🆔</div>
+                    <div class="highlight-title">Minimal Data Intake</div>
+                    <div class="highlight-desc">Only public Discord User ID, username, and display name are retained for identity and session mapping.</div>
+                </div>
+                <div class="highlight-item">
+                    <div class="highlight-icon">📜</div>
+                    <div class="highlight-title">Local Audit Trail</div>
+                    <div class="highlight-desc">Administrative operations are logged locally to provide transparency and accountability for server owners.</div>
+                </div>
+            </div>
+
+            <!-- Section 1 -->
+            <div class="section">
+                <h2>1. Overview &amp; Privacy Commitment</h2>
+                <p>
+                    Sköll is built from the ground up on a foundation of user privacy, data minimization, and infrastructure autonomy. Unlike cloud-hosted SaaS administration platforms, Sköll operates as a <strong>100% self-hosted application</strong> running directly on your host machine or private container network.
+                </p>
+                <div class="callout-box">
+                    <strong>Zero External Telemetry:</strong> Sköll contains no tracking pixels, telemetry beacons, external monitoring agents, or behavioral analytics. Your data remains strictly within the physical or virtual boundaries of your server.
+                </div>
+            </div>
+
+            <!-- Section 2 -->
+            <div class="section">
+                <h2>2. Information Collected &amp; Processed</h2>
+                <p>
+                    Sköll collects and processes only the minimal information strictly necessary to authenticate administrators and execute secure container operations:
+                </p>
+                <ul>
+                    <li>
+                        <strong>Discord Identity (Authentication):</strong> When you log in using Discord OAuth2, Sköll requests only the standard <code>identify</code> scope from Discord's official API. This provides:
+                        <ul>
+                            <li>Your unique Discord Snowflake User ID (<code>id</code>)</li>
+                            <li>Your Discord username (<code>username</code>) and display name (<code>global_name</code>)</li>
+                        </ul>
+                        <em>Sköll never requests, receives, or stores your email address, passwords, payment details, private messages, or friend lists.</em>
+                    </li>
+                    <li>
+                        <strong>Encrypted Session Cookies:</strong> When authenticated via the web dashboard, Sköll issues an HTTP-only, encrypted session cookie (<code>skoll_session</code>) containing your Discord User ID, username, and assigned role, secured with AES-256-GCM authenticated encryption.
+                    </li>
+                    <li>
+                        <strong>Administrative Audit Logs:</strong> When an authorized user triggers an action (such as deploying a stack, restarting containers, modifying YAML, or purging archives), Sköll records an entry in the local <code>audit_logs</code> SQLite table:
+                        <ul>
+                            <li>Timestamp of execution (UTC)</li>
+                            <li>Acting Discord User ID and Username</li>
+                            <li>Action name (e.g. <code>server_restart</code>, <code>compose_update</code>, <code>archive_purge</code>)</li>
+                            <li>Target container stack name</li>
+                            <li>Execution status (<code>SUCCESS</code>, <code>FAILED</code>, or <code>UNAUTHORIZED</code>)</li>
+                        </ul>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- Section 3 -->
+            <div class="section">
+                <h2>3. How Information is Used</h2>
+                <p>
+                    The collected information is used solely for the following operational purposes:
+                </p>
+                <ul>
+                    <li><strong>Authentication &amp; RBAC:</strong> To verify your Discord identity and enforce Role-Based Access Control (Admin, Operator, Viewer, Unlinked).</li>
+                    <li><strong>Security &amp; Accountability:</strong> To maintain an immutable local audit feed so the server owner can review which administrator initiated changes to Docker Compose stacks.</li>
+                    <li><strong>Session Management:</strong> To maintain your active login state while interacting with the web dashboard.</li>
+                </ul>
+            </div>
+
+            <!-- Section 4 -->
+            <div class="section">
+                <h2>4. Third-Party Data Sharing</h2>
+                <p>
+                    Sköll maintains a strict zero-sharing policy:
+                </p>
+                <ul>
+                    <li><strong>No Sale or Transfer:</strong> Your personal data is never sold, shared, rented, or traded to any third party, data broker, or marketing entity.</li>
+                    <li><strong>Discord API:</strong> The sole external network interaction occurs directly between your self-hosted Sköll instance and Discord's official OAuth2 endpoint (<code>https://discord.com/api/v10/oauth2/token</code> and <code>/users/@me</code>) to exchange the temporary OAuth code for your public user identity.</li>
+                </ul>
+            </div>
+
+            <!-- Section 5 -->
+            <div class="section">
+                <h2>5. Data Storage, Retention &amp; Security</h2>
+                <p>
+                    All database records are stored in an embedded SQLite database file (typically <code>skoll.db</code>) located in the local working directory or specified via <code>SKOLL_DB_PATH</code>:
+                </p>
+                <ul>
+                    <li>Data remains on the server until explicitly purged or deleted by the host administrator.</li>
+                    <li>Session cookies are protected by AES-256-GCM encryption with keys derived using SHA-256 from your configured secret.</li>
+                    <li>No external cloud databases or hosted backups are contacted by Sköll.</li>
+                </ul>
+            </div>
+
+            <!-- Section 6 -->
+            <div class="section">
+                <h2>6. User Rights &amp; Data Deletion</h2>
+                <p>
+                    Because all data is stored locally in the instance's SQLite database, users have full rights regarding their information:
+                </p>
+                <ul>
+                    <li><strong>Inspection:</strong> Linked users can view their current role and status in the Sköll administration panel.</li>
+                    <li><strong>Deletion:</strong> You may request the removal of your linked Discord account and role from the instance by contacting the server administrator. Administrators can delete records or purge audit logs at any time using the dashboard or standard SQLite commands.</li>
+                </ul>
+            </div>
+
+            <!-- Section 7 -->
+            <div class="section">
+                <h2>7. Inquiries &amp; Contact</h2>
+                <p>
+                    If you have questions regarding the privacy practices of this specific Sköll deployment or wish to request data removal, please contact the administrator managing this self-hosted server instance.
+                </p>
+            </div>
+        </main>
+
+        <!-- Page Footer -->
+        <footer class="page-footer">
+            <div>
+                <a href="/tos">Terms of Service</a> &bull;
+                <a href="/privacy">Privacy Policy</a> &bull;
+                <a href="/login">Discord Login</a> &bull;
+                <a href="/admin">Dashboard</a>
+            </div>
+            <div style="margin-top: 8px;">
+                Sköll &bull; Open-Source &amp; Self-Hosted &bull; Connected to Fenrir Daemon
+            </div>
+        </footer>
     </div>
 </body>
 </html>`))

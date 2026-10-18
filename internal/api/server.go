@@ -95,6 +95,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /auth/logout", s.handleAuthLogout)
 	s.mux.HandleFunc("GET /link", s.handleLinkRedirect)
 
+	// Public Legal & Compliance Pages (Accessible without authentication)
+	s.mux.HandleFunc("GET /tos", s.handleTermsOfService)
+	s.mux.HandleFunc("GET /terms", s.handleTermsOfService)
+	s.mux.HandleFunc("GET /privacy", s.handlePrivacyPolicy)
+
 	// Admin Control Panel (Web Routes)
 	s.mux.HandleFunc("GET /admin", s.handleAdminDashboard)
 	s.mux.HandleFunc("GET /admin/stacks", s.handleAdminStacksRedirect)
@@ -167,6 +172,18 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	_ = loginTemplate.Execute(w, map[string]any{
 		"ErrorMessage": errMsg,
 	})
+}
+
+// handleTermsOfService renders the public Terms of Service page.
+func (s *Server) handleTermsOfService(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = tosTemplate.Execute(w, nil)
+}
+
+// handlePrivacyPolicy renders the public Privacy Policy page.
+func (s *Server) handlePrivacyPolicy(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = privacyTemplate.Execute(w, nil)
 }
 
 // handleAuthLogin redirects users to Discord's OAuth2 authorization URL with the identify scope.

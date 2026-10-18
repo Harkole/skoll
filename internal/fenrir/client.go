@@ -194,6 +194,26 @@ func (c *Client) DeployProject(ctx context.Context, name, composeYAML string) er
 	return c.do(ctx, http.MethodPost, "/api/v1/projects", req, nil)
 }
 
+// DeleteProject signals Fenrir to gracefully bring down a stack, release ports, archive with 90-day retention, and delete project files.
+func (c *Client) DeleteProject(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s", url.PathEscape(name)), nil, nil)
+}
+
+// StartContainer starts a stopped container via Fenrir Daemon.
+func (c *Client) StartContainer(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/v1/containers/%s/start", url.PathEscape(name)), nil, nil)
+}
+
+// StopContainer stops a running container via Fenrir Daemon.
+func (c *Client) StopContainer(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/v1/containers/%s/stop", url.PathEscape(name)), nil, nil)
+}
+
+// RestartContainer restarts a container via Fenrir Daemon.
+func (c *Client) RestartContainer(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/api/v1/containers/%s/restart", url.PathEscape(name)), nil, nil)
+}
+
 // GetHost queries host telemetry and hardware metrics from Fenrir via GET /api/v1/host.
 func (c *Client) GetHost(ctx context.Context) (*HostMetrics, error) {
 	var metrics HostMetrics

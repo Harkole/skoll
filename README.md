@@ -171,6 +171,11 @@ Authentication is strictly managed via Discord OAuth2 (`/login`). Users must pos
 - `POST /api/v1/archives/{id}/restore` — Restore archived stack backup back into stack directory (**Admin only**).
 - `DELETE /api/v1/archives/{id}` — Permanently purge archive backup from disk and clear database record (**Admin only**).
 
+### Public Web & Legal Endpoints:
+- `GET /login` — Web login landing page with Discord OAuth2 button.
+- `GET /tos` (alias: `GET /terms`) — Public Terms of Service page detailing "as-is" self-hosted software provisions, container administration, and credential security.
+- `GET /privacy` — Public Privacy Policy page confirming zero third-party telemetry, local SQLite audit storage, and data minimization.
+
 ---
 
 ## 🚀 Building & Running
